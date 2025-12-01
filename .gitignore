@@ -1,0 +1,49 @@
+# Learnit.Server (Visual Studio / .NET)
+# Visual Studio temporary files, build results, etc.
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build
+[Bb]in/
+[Oo]bj/
+**/bin/
+**/obj/
+
+# Publish / deployment
+publish/
+*.Publish.xml
+
+# NuGet
+packages/
+project.lock.json
+project.assets.json
+
+# Rider / IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# Test results
+TestResults/
+*.trx
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+
+# Resharper / dotCover / tools
+_ReSharper*/
+*.DotSettings.user
+*.dotCover
+
+# Environment
+.env
+.env.*
+
+# Misc
+*.vspscc
+*.vssscc
