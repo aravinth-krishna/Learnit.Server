@@ -13,7 +13,33 @@ namespace Learnit.Server.Models
         public int HoursRemaining { get; set; }
         public DateTime? TargetCompletionDate { get; set; }
         public DateTime CreatedAt { get; set; }
+        public DateTime UpdatedAt { get; set; }
+        public string Notes { get; set; } = "";
+        public bool IsActive { get; set; }
+        public DateTime? LastStudiedAt { get; set; }
         public List<CourseModuleDto> Modules { get; set; } = new();
+        public List<ExternalLinkDto> ExternalLinks { get; set; } = new();
+        public StudySessionDto? ActiveSession { get; set; } // Current active study session if any
+    }
+
+    public class ExternalLinkDto
+    {
+        public int Id { get; set; }
+        public string Platform { get; set; } = "";
+        public string Title { get; set; } = "";
+        public string Url { get; set; } = "";
+        public DateTime CreatedAt { get; set; }
+    }
+
+    public class StudySessionDto
+    {
+        public int Id { get; set; }
+        public int? CourseModuleId { get; set; }
+        public DateTime StartTime { get; set; }
+        public DateTime? EndTime { get; set; }
+        public decimal DurationHours { get; set; }
+        public string Notes { get; set; } = "";
+        public bool IsCompleted { get; set; }
     }
 
     public class CourseModuleDto

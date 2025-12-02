@@ -3,6 +3,7 @@ using System;
 using Learnit.Server.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Server.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20251202143708_AddActivityLog")]
+    partial class AddActivityLog
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -71,17 +74,7 @@ namespace Server.Migrations
                     b.Property<int>("HoursRemaining")
                         .HasColumnType("integer");
 
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<DateTime?>("LastStudiedAt")
-                        .HasColumnType("timestamp with time zone");
-
                     b.Property<string>("LearningObjectives")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Notes")
                         .IsRequired()
                         .HasColumnType("text");
 
@@ -142,39 +135,6 @@ namespace Server.Migrations
                     b.ToTable("CourseModules");
                 });
 
-            modelBuilder.Entity("Learnit.Server.Models.ExternalLink", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("CourseId")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Platform")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Url")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CourseId");
-
-                    b.ToTable("ExternalLinks");
-                });
-
             modelBuilder.Entity("Learnit.Server.Models.ScheduleEvent", b =>
                 {
                     b.Property<int>("Id")
@@ -215,48 +175,6 @@ namespace Server.Migrations
                     b.ToTable("ScheduleEvents");
                 });
 
-            modelBuilder.Entity("Learnit.Server.Models.StudySession", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("CourseId")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("CourseModuleId")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<decimal>("DurationHours")
-                        .HasColumnType("numeric");
-
-                    b.Property<DateTime?>("EndTime")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<bool>("IsCompleted")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("Notes")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<DateTime>("StartTime")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CourseId");
-
-                    b.HasIndex("CourseModuleId");
-
-                    b.ToTable("StudySessions");
-                });
-
             modelBuilder.Entity("Learnit.Server.Models.User", b =>
                 {
                     b.Property<int>("Id")
@@ -264,6 +182,9 @@ namespace Server.Migrations
                         .HasColumnType("integer");
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("DarkMode")
                         .HasColumnType("boolean");
@@ -287,7 +208,7 @@ namespace Server.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<int>("WeeklyLimitHours")
+                    b.Property<int>("WeeklyStudyLimitHours")
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
@@ -317,17 +238,6 @@ namespace Server.Migrations
                     b.Navigation("Course");
                 });
 
-            modelBuilder.Entity("Learnit.Server.Models.ExternalLink", b =>
-                {
-                    b.HasOne("Learnit.Server.Models.Course", "Course")
-                        .WithMany("ExternalLinks")
-                        .HasForeignKey("CourseId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Course");
-                });
-
             modelBuilder.Entity("Learnit.Server.Models.ScheduleEvent", b =>
                 {
                     b.HasOne("Learnit.Server.Models.CourseModule", "CourseModule")
@@ -337,30 +247,9 @@ namespace Server.Migrations
                     b.Navigation("CourseModule");
                 });
 
-            modelBuilder.Entity("Learnit.Server.Models.StudySession", b =>
-                {
-                    b.HasOne("Learnit.Server.Models.Course", "Course")
-                        .WithMany("StudySessions")
-                        .HasForeignKey("CourseId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Learnit.Server.Models.CourseModule", "CourseModule")
-                        .WithMany()
-                        .HasForeignKey("CourseModuleId");
-
-                    b.Navigation("Course");
-
-                    b.Navigation("CourseModule");
-                });
-
             modelBuilder.Entity("Learnit.Server.Models.Course", b =>
                 {
-                    b.Navigation("ExternalLinks");
-
                     b.Navigation("Modules");
-
-                    b.Navigation("StudySessions");
                 });
 #pragma warning restore 612, 618
         }
