@@ -15,9 +15,16 @@ namespace Learnit.Server.Models
         public DateTime? TargetCompletionDate { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
-        
-        // Navigation property
+
+        // New fields for enhanced course management
+        public string Notes { get; set; } = "";
+        public bool IsActive { get; set; } = true; // Whether the course is currently being studied
+        public DateTime? LastStudiedAt { get; set; } // When the user last studied this course
+
+        // Navigation properties
         public List<CourseModule> Modules { get; set; } = new();
+        public List<ExternalLink> ExternalLinks { get; set; } = new();
+        public List<StudySession> StudySessions { get; set; } = new();
     }
 }
 

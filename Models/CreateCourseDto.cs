@@ -10,7 +10,16 @@ namespace Learnit.Server.Models
         public string Priority { get; set; } = "";
         public int TotalEstimatedHours { get; set; }
         public DateTime? TargetCompletionDate { get; set; }
+        public string Notes { get; set; } = "";
         public List<CreateCourseModuleDto> Modules { get; set; } = new();
+        public List<CreateExternalLinkDto> ExternalLinks { get; set; } = new();
+    }
+
+    public class CreateExternalLinkDto
+    {
+        public string Platform { get; set; } = "";
+        public string Title { get; set; } = "";
+        public string Url { get; set; } = "";
     }
 
     public class CreateCourseModuleDto
