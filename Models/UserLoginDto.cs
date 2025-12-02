@@ -1,4 +1,4 @@
-﻿namespace ReactAppTest.Server.Models
+﻿namespace Learnit.Server.Models
 {
         public class UserLoginDto
         {

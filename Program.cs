@@ -1,12 +1,12 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
-using ReactAppTest.Server.Data;
-using ReactAppTest.Server.Services;
+using Learnit.Server.Data;
+using Learnit.Server.Services;
 using Npgsql.EntityFrameworkCore.PostgreSQL;
 using Microsoft.AspNetCore.Authentication.JwtBearer; 
 
-namespace ReactAppTest.Server
+namespace Learnit.Server
 {
     public class Program
     {

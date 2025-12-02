@@ -1,9 +1,9 @@
 ﻿
 using Microsoft.EntityFrameworkCore;
-using ReactAppTest.Server.Models;
+using Learnit.Server.Models;
 using System.Collections.Generic;
 
-namespace ReactAppTest.Server.Data
+namespace Learnit.Server.Data
 {
     public class AppDbContext : DbContext
     {

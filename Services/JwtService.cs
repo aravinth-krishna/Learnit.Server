@@ -2,9 +2,9 @@
 using System.Security.Claims;
 using System.Text;
 using Microsoft.IdentityModel.Tokens;
-using ReactAppTest.Server.Models;
+using Learnit.Server.Models;
 
-namespace ReactAppTest.Server.Services
+namespace Learnit.Server.Services
 {
     public class JwtService
     {

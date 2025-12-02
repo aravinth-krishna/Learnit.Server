@@ -1,12 +1,12 @@
 ﻿using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
-using ReactAppTest.Server.Data;
-using ReactAppTest.Server.Models;
-using ReactAppTest.Server.Services;
+using Learnit.Server.Data;
+using Learnit.Server.Models;
+using Learnit.Server.Services;
 using Microsoft.EntityFrameworkCore;
-using User = ReactAppTest.Server.Models.User;
+using User = Learnit.Server.Models.User;
 
-namespace ReactAppTest.Server.Controllers
+namespace Learnit.Server.Controllers
 {
     [ApiController]
     [Route("api/auth")]

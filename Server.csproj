@@ -4,10 +4,10 @@
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <SpaRoot>..\reactapptest.client</SpaRoot>
+    <SpaRoot>..\Learnit.client</SpaRoot>
     <SpaProxyLaunchCommand>npm run dev</SpaProxyLaunchCommand>
     <SpaProxyServerUrl>https://localhost:51338</SpaProxyServerUrl>
-    <StartupObject>ReactAppTest.Server.Program</StartupObject>
+    <StartupObject>Learnit.Server.Program</StartupObject>
   </PropertyGroup>
 
   <ItemGroup>
@@ -32,7 +32,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\reactapptest.client\client.esproj">
+    <ProjectReference Include="..\Learnit.client\client.esproj">
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
     </ProjectReference>
   </ItemGroup>
