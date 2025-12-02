@@ -3,6 +3,7 @@ using System;
 using Learnit.Server.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Server.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20251202123442_AddScheduleEvents")]
+    partial class AddScheduleEvents
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -116,9 +119,6 @@ namespace Server.Migrations
                     b.Property<bool>("AllDay")
                         .HasColumnType("boolean");
 
-                    b.Property<int?>("CourseModuleId")
-                        .HasColumnType("integer");
-
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -139,8 +139,6 @@ namespace Server.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("CourseModuleId");
 
                     b.ToTable("ScheduleEvents");
                 });
@@ -179,15 +177,6 @@ namespace Server.Migrations
                         .IsRequired();
 
                     b.Navigation("Course");
-                });
-
-            modelBuilder.Entity("Learnit.Server.Models.ScheduleEvent", b =>
-                {
-                    b.HasOne("Learnit.Server.Models.CourseModule", "CourseModule")
-                        .WithMany()
-                        .HasForeignKey("CourseModuleId");
-
-                    b.Navigation("CourseModule");
                 });
 
             modelBuilder.Entity("Learnit.Server.Models.Course", b =>
