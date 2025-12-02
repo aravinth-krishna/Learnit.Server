@@ -265,9 +265,6 @@ namespace Server.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
                     b.Property<bool>("DarkMode")
                         .HasColumnType("boolean");
 
@@ -290,7 +287,7 @@ namespace Server.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<int>("WeeklyStudyLimitHours")
+                    b.Property<int>("WeeklyLimitHours")
                         .HasColumnType("integer");
 
                     b.HasKey("Id");

@@ -18,6 +18,9 @@ namespace Learnit.Server
             builder.Services.AddDbContext<AppDbContext>(opt =>
                 opt.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
 
+            builder.Services.AddScoped<IProfileService, ProfileService>();
+
+
             builder.Services.AddCors(opt =>
             {
                 opt.AddPolicy("AllowFrontend", b =>
