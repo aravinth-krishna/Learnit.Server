@@ -26,7 +26,7 @@ namespace Learnit.Server.Controllers
         public async Task<IActionResult> Register(UserRegisterDto dto)
         {
             if (await _db.Users.AnyAsync(u => u.Email == dto.Email))
-                return BadRequest("User already exists");
+                return BadRequest(new { message = "User already exists" });
 
             var user = new User
             {
@@ -39,7 +39,7 @@ namespace Learnit.Server.Controllers
             _db.Users.Add(user);
             await _db.SaveChangesAsync();
 
-            return Ok("Registered successfully");
+            return Ok(new { message = "Registered successfully" });
         }
 
         [HttpPost("login")]
@@ -48,16 +48,25 @@ namespace Learnit.Server.Controllers
             var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == dto.Email);
 
             if (user == null)
-                return BadRequest("Invalid credentials");
+                return BadRequest(new { message = "Invalid credentials" });
 
             var result = _hasher.VerifyHashedPassword(user, user.PasswordHash, dto.Password);
 
             if (result == PasswordVerificationResult.Failed)
-                return BadRequest("Invalid credentials");
+                return BadRequest(new { message = "Invalid credentials" });
 
             var token = _jwt.Generate(user);
 
             return Ok(new { token });
+        }
+
+        [HttpPost("logout")]
+        [Microsoft.AspNetCore.Authorization.Authorize]
+        public IActionResult Logout()
+        {
+            // Since JWT is stateless, logout is handled client-side by removing the token
+            // This endpoint can be used for logging purposes or future token blacklisting
+            return Ok(new { message = "Logged out successfully" });
         }
     }
 }

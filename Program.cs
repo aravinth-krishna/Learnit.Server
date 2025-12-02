@@ -21,10 +21,10 @@ namespace Learnit.Server
             builder.Services.AddCors(opt =>
             {
                 opt.AddPolicy("AllowFrontend", b =>
-                    b.WithOrigins("http://localhost:5173")
+                    b.WithOrigins("http://localhost:5173", "https://localhost:51338", "http://localhost:51338")
                      .AllowAnyHeader()
                      .AllowAnyMethod()
-                     .AllowAnyOrigin());
+                     .AllowCredentials());
             });
 
 
@@ -43,7 +43,7 @@ namespace Learnit.Server
                         ValidIssuer = builder.Configuration["Jwt:Issuer"],
                         ValidAudience = builder.Configuration["Jwt:Audience"],
                         IssuerSigningKey = new SymmetricSecurityKey(
-                            System.Text.Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]))
+                            System.Text.Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationException("JWT Key is not configured")))
                     };
                 });
 
