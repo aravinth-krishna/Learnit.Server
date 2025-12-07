@@ -42,14 +42,18 @@ namespace Learnit.Server.Controllers
             var weekStart = DateTime.UtcNow.Date.AddDays(-6); // 7 days ago
             var weekEnd = DateTime.UtcNow.Date.AddDays(1); // Tomorrow
 
-            // Get scheduled vs completed for the week
+            // Get scheduled vs completed for the week (keep scheduled; completed based on module completion hours)
             var weeklyEvents = await _db.ScheduleEvents
                 .Where(e => e.UserId == userId &&
                            e.StartUtc >= weekStart &&
                            e.StartUtc < weekEnd)
                 .ToListAsync();
 
-            // Calculate weekly data by day
+            // Precompute completed hours from modules (estimated hours of completed modules)
+            var moduleCompletionHours = await _db.CourseModules
+                .Where(m => m.Course!.UserId == userId && m.IsCompleted)
+                .SumAsync(m => (decimal)m.EstimatedHours);
+
             var weeklyData = new List<WeeklyDataPoint>();
             for (int i = 6; i >= 0; i--)
             {
@@ -60,8 +64,10 @@ namespace Learnit.Server.Controllers
                     ? (decimal)(e.EndUtc.Value - e.StartUtc).TotalHours
                     : 0);
 
-                // For now, assume completed = scheduled (in a real app, you'd track completion)
-                var completed = scheduled;
+                // Spread completed hours evenly across days as a simple visual (better: track completion timestamps)
+                var completed = weeklyEvents.Count > 0
+                    ? moduleCompletionHours / weeklyEvents.Count
+                    : moduleCompletionHours;
 
                 weeklyData.Add(new WeeklyDataPoint
                 {
@@ -87,15 +93,24 @@ namespace Learnit.Server.Controllers
                 .Where(c => c.UserId == userId)
                 .ToListAsync();
 
-            var courseProgress = courses.Select(c => new CourseProgressDto
+            var courseProgress = courses.Select(c =>
             {
-                Id = c.Id,
-                Title = c.Title,
-                TotalHours = c.TotalEstimatedHours,
-                CompletedHours = c.TotalEstimatedHours - c.HoursRemaining, // Simplified
-                ProgressPercentage = c.TotalEstimatedHours > 0
-                    ? (decimal)Math.Round((double)(((c.TotalEstimatedHours - c.HoursRemaining) / c.TotalEstimatedHours) * 100), 1)
-                    : 0
+                var totalModules = c.Modules.Count;
+                var completedModules = c.Modules.Count(m => m.IsCompleted);
+                var completedHours = c.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
+                var totalHours = c.Modules.Sum(m => m.EstimatedHours);
+                var progressPct = totalModules > 0
+                    ? (decimal)Math.Round((double)completedModules * 100 / totalModules, 1)
+                    : 0;
+
+                return new CourseProgressDto
+                {
+                    Id = c.Id,
+                    Title = c.Title,
+                    TotalHours = totalHours,
+                    CompletedHours = completedHours,
+                    ProgressPercentage = progressPct
+                };
             }).ToList();
 
             // Calculate overall progress
