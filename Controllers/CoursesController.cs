@@ -195,6 +195,7 @@ namespace Learnit.Server.Controllers
                 {
                     Id = m.Id,
                     Title = m.Title,
+                    Description = m.Description,
                     EstimatedHours = m.EstimatedHours,
                     Order = m.Order,
                     ParentModuleId = m.ParentModuleId,
@@ -678,6 +679,58 @@ namespace Learnit.Server.Controllers
         }
 
         // Module Management
+        [HttpPost("{courseId}/modules")]
+        public async Task<IActionResult> CreateModule(int courseId, [FromBody] CreateModuleDto dto)
+        {
+            var userId = GetUserId();
+            var course = await _db.Courses
+                .Include(c => c.Modules)
+                .FirstOrDefaultAsync(c => c.Id == courseId && c.UserId == userId);
+
+            if (course == null)
+                return NotFound();
+
+            if (string.IsNullOrWhiteSpace(dto.Title))
+                return BadRequest(new { message = "Title is required" });
+
+            if (dto.ParentModuleId.HasValue)
+            {
+                var parentExists = course.Modules.Any(m => m.Id == dto.ParentModuleId.Value);
+                if (!parentExists)
+                    return BadRequest(new { message = "Parent module not found" });
+            }
+
+            var nextOrder = course.Modules.Any() ? course.Modules.Max(m => m.Order) + 1 : 0;
+
+            var module = new CourseModule
+            {
+                CourseId = courseId,
+                Title = dto.Title,
+                Description = dto.Description ?? "",
+                EstimatedHours = dto.EstimatedHours ?? 0,
+                Order = nextOrder,
+                ParentModuleId = dto.ParentModuleId,
+                Notes = dto.Notes ?? "",
+                IsCompleted = false
+            };
+
+            _db.CourseModules.Add(module);
+            course.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+
+            return Ok(new CourseModuleDto
+            {
+                Id = module.Id,
+                Title = module.Title,
+                Description = module.Description,
+                EstimatedHours = module.EstimatedHours,
+                Order = module.Order,
+                ParentModuleId = module.ParentModuleId,
+                Notes = module.Notes,
+                IsCompleted = module.IsCompleted
+            });
+        }
+
         [HttpPut("modules/{moduleId}")]
         public async Task<IActionResult> UpdateModule(int moduleId, [FromBody] UpdateModuleDto dto)
         {
@@ -867,6 +920,15 @@ namespace Learnit.Server.Controllers
         public int? EstimatedHours { get; set; }
         public string? Notes { get; set; }
         public int? ParentModuleId { get; set; }
+    }
+
+    public class CreateModuleDto
+    {
+        public string Title { get; set; } = "";
+        public string? Description { get; set; }
+        public int? EstimatedHours { get; set; }
+        public int? ParentModuleId { get; set; }
+        public string? Notes { get; set; }
     }
 
     public class UpdateExternalLinkDto
