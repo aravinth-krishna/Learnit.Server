@@ -16,7 +16,8 @@ namespace Learnit.Server
             var builder = WebApplication.CreateBuilder(args);
 
             builder.Services.AddDbContext<AppDbContext>(opt =>
-                opt.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+                opt.UseNpgsql(builder.Configuration.GetConnectionString("Default"))
+                   .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)));
 
             builder.Services.AddCors(opt =>
             {

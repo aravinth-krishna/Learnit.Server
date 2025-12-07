@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Learnit.Server.Data;
 using Learnit.Server.Models;
 using System.Security.Claims;
+using System.Collections.Generic;
 
 namespace Learnit.Server.Controllers
 {
@@ -126,8 +127,12 @@ namespace Learnit.Server.Controllers
                 {
                     Id = m.Id,
                     Title = m.Title,
+                    Description = m.Description,
                     EstimatedHours = m.EstimatedHours,
-                    Order = m.Order
+                    Order = m.Order,
+                    ParentModuleId = m.ParentModuleId,
+                    Notes = m.Notes,
+                    IsCompleted = m.IsCompleted
                 }).ToList(),
                 ExternalLinks = c.ExternalLinks.Select(l => new ExternalLinkDto
                 {
@@ -191,7 +196,10 @@ namespace Learnit.Server.Controllers
                     Id = m.Id,
                     Title = m.Title,
                     EstimatedHours = m.EstimatedHours,
-                    Order = m.Order
+                    Order = m.Order,
+                    ParentModuleId = m.ParentModuleId,
+                    Notes = m.Notes,
+                    IsCompleted = m.IsCompleted
                 }).ToList(),
                 ExternalLinks = course.ExternalLinks.Select(l => new ExternalLinkDto
                 {
@@ -267,8 +275,12 @@ namespace Learnit.Server.Controllers
                 {
                     CourseId = course.Id,
                     Title = moduleDto.Title,
+                    Description = moduleDto.Description,
                     EstimatedHours = moduleDto.EstimatedHours,
-                    Order = i
+                    Order = i,
+                    ParentModuleId = moduleDto.ParentModuleId,
+                    Notes = moduleDto.Notes,
+                    IsCompleted = moduleDto.IsCompleted
                 };
                 _db.CourseModules.Add(module);
             }
@@ -317,7 +329,10 @@ namespace Learnit.Server.Controllers
                     Id = m.Id,
                     Title = m.Title,
                     EstimatedHours = m.EstimatedHours,
-                    Order = m.Order
+                    Order = m.Order,
+                    ParentModuleId = m.ParentModuleId,
+                    Notes = m.Notes,
+                    IsCompleted = m.IsCompleted
                 }).ToList(),
                 ExternalLinks = course.ExternalLinks.Select(l => new ExternalLinkDto
                 {
@@ -333,46 +348,49 @@ namespace Learnit.Server.Controllers
         }
 
         [HttpPut("{id}")]
-        public async Task<IActionResult> UpdateCourse(int id, CreateCourseDto dto)
+        public async Task<IActionResult> UpdateCourse(int id, [FromBody] Dictionary<string, object> updates)
         {
             var userId = GetUserId();
             var course = await _db.Courses
-                .Include(c => c.Modules)
                 .FirstOrDefaultAsync(c => c.Id == id && c.UserId == userId);
 
             if (course == null)
                 return NotFound();
 
-            course.Title = dto.Title;
-            course.Description = dto.Description;
-            course.SubjectArea = dto.SubjectArea;
-            course.LearningObjectives = dto.LearningObjectives;
-            course.Difficulty = dto.Difficulty;
-            course.Priority = dto.Priority;
-            course.TotalEstimatedHours = dto.TotalEstimatedHours;
-            course.TargetCompletionDate = EnsureUtc(dto.TargetCompletionDate);
-            course.UpdatedAt = DateTime.UtcNow;
-
-            // Update hours remaining based on completed modules (if tracking was added)
-            course.HoursRemaining = dto.TotalEstimatedHours;
-
-            // Remove existing modules
-            _db.CourseModules.RemoveRange(course.Modules);
-
-            // Add new modules
-            for (int i = 0; i < dto.Modules.Count; i++)
+            // Update only provided fields
+            if (updates.ContainsKey("title") && updates["title"] != null)
+                course.Title = updates["title"].ToString() ?? "";
+            if (updates.ContainsKey("description") && updates["description"] != null)
+                course.Description = updates["description"].ToString() ?? "";
+            if (updates.ContainsKey("subjectArea") && updates["subjectArea"] != null)
+                course.SubjectArea = updates["subjectArea"].ToString() ?? "";
+            if (updates.ContainsKey("learningObjectives") && updates["learningObjectives"] != null)
+                course.LearningObjectives = updates["learningObjectives"].ToString() ?? "";
+            if (updates.ContainsKey("difficulty") && updates["difficulty"] != null)
+                course.Difficulty = updates["difficulty"].ToString() ?? "";
+            if (updates.ContainsKey("priority") && updates["priority"] != null)
+                course.Priority = updates["priority"].ToString() ?? "";
+            if (updates.ContainsKey("totalEstimatedHours") && updates["totalEstimatedHours"] != null)
             {
-                var moduleDto = dto.Modules[i];
-                var module = new CourseModule
+                if (int.TryParse(updates["totalEstimatedHours"].ToString(), out int hours))
                 {
-                    CourseId = course.Id,
-                    Title = moduleDto.Title,
-                    EstimatedHours = moduleDto.EstimatedHours,
-                    Order = i
-                };
-                _db.CourseModules.Add(module);
+                    course.TotalEstimatedHours = hours;
+                    // Recalculate hours remaining
+                    var completedHours = await _db.StudySessions
+                        .Where(s => s.CourseId == id && s.IsCompleted)
+                        .SumAsync(s => s.DurationHours);
+                    course.HoursRemaining = Math.Max(0, course.TotalEstimatedHours - (int)completedHours);
+                }
             }
+            if (updates.ContainsKey("targetCompletionDate") && updates["targetCompletionDate"] != null)
+            {
+                if (DateTime.TryParse(updates["targetCompletionDate"].ToString(), out DateTime date))
+                    course.TargetCompletionDate = EnsureUtc(date);
+            }
+            if (updates.ContainsKey("notes") && updates["notes"] != null)
+                course.Notes = updates["notes"].ToString() ?? "";
 
+            course.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync();
 
             return Ok(new { message = "Course updated successfully" });
@@ -397,6 +415,31 @@ namespace Learnit.Server.Controllers
         }
 
         // Course Editing Methods
+        [HttpPatch("modules/{moduleId}/toggle-completion")]
+        public async Task<IActionResult> ToggleModuleCompletion(int moduleId)
+        {
+            var userId = GetUserId();
+            var module = await _db.CourseModules
+                .Include(m => m.Course)
+                .FirstOrDefaultAsync(m => m.Id == moduleId && m.Course.UserId == userId);
+
+            if (module == null)
+                return NotFound();
+
+            module.IsCompleted = !module.IsCompleted;
+
+            // Update course progress
+            var course = module.Course;
+            var completedHours = await _db.StudySessions
+                .Where(s => s.CourseId == course.Id && s.IsCompleted)
+                .SumAsync(s => s.DurationHours);
+            course.HoursRemaining = Math.Max(0, course.TotalEstimatedHours - (int)completedHours);
+
+            await _db.SaveChangesAsync();
+
+            return Ok(new { module.IsCompleted, course.HoursRemaining });
+        }
+
         [HttpPut("{id}/edit")]
         public async Task<IActionResult> EditCourse(int id, CreateCourseDto dto)
         {
@@ -436,8 +479,12 @@ namespace Learnit.Server.Controllers
                 {
                     CourseId = course.Id,
                     Title = moduleDto.Title,
+                    Description = moduleDto.Description,
                     EstimatedHours = moduleDto.EstimatedHours,
-                    Order = i
+                    Order = i,
+                    ParentModuleId = moduleDto.ParentModuleId,
+                    Notes = moduleDto.Notes,
+                    IsCompleted = moduleDto.IsCompleted
                 };
                 _db.CourseModules.Add(module);
             }
@@ -629,6 +676,209 @@ namespace Learnit.Server.Controllers
                     .FirstOrDefault()?.Title ?? "No upcoming milestones"
             });
         }
+
+        // Module Management
+        [HttpPut("modules/{moduleId}")]
+        public async Task<IActionResult> UpdateModule(int moduleId, [FromBody] UpdateModuleDto dto)
+        {
+            var userId = GetUserId();
+            var module = await _db.CourseModules
+                .Include(m => m.Course)
+                .FirstOrDefaultAsync(m => m.Id == moduleId && m.Course!.UserId == userId);
+
+            if (module == null)
+                return NotFound();
+
+            if (!string.IsNullOrEmpty(dto.Title))
+                module.Title = dto.Title;
+            if (!string.IsNullOrEmpty(dto.Description))
+                module.Description = dto.Description;
+            if (dto.EstimatedHours.HasValue)
+                module.EstimatedHours = dto.EstimatedHours.Value;
+            if (!string.IsNullOrEmpty(dto.Notes))
+                module.Notes = dto.Notes;
+            if (dto.ParentModuleId.HasValue)
+                module.ParentModuleId = dto.ParentModuleId.Value;
+
+            module.Course!.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+
+            return Ok(new CourseModuleDto
+            {
+                Id = module.Id,
+                Title = module.Title,
+                Description = module.Description,
+                EstimatedHours = module.EstimatedHours,
+                Order = module.Order,
+                ParentModuleId = module.ParentModuleId,
+                Notes = module.Notes,
+                IsCompleted = module.IsCompleted
+            });
+        }
+
+        // External Links Management
+        [HttpPost("{courseId}/external-links")]
+        public async Task<IActionResult> AddExternalLink(int courseId, [FromBody] CreateExternalLinkDto dto)
+        {
+            var userId = GetUserId();
+            var course = await _db.Courses
+                .FirstOrDefaultAsync(c => c.Id == courseId && c.UserId == userId);
+
+            if (course == null)
+                return NotFound();
+
+            var link = new ExternalLink
+            {
+                CourseId = courseId,
+                Platform = dto.Platform,
+                Title = dto.Title,
+                Url = dto.Url,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _db.ExternalLinks.Add(link);
+            course.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+
+            return Ok(new ExternalLinkDto
+            {
+                Id = link.Id,
+                Platform = link.Platform,
+                Title = link.Title,
+                Url = link.Url,
+                CreatedAt = link.CreatedAt
+            });
+        }
+
+        [HttpPut("external-links/{linkId}")]
+        public async Task<IActionResult> UpdateExternalLink(int linkId, [FromBody] UpdateExternalLinkDto dto)
+        {
+            var userId = GetUserId();
+            var link = await _db.ExternalLinks
+                .Include(l => l.Course)
+                .FirstOrDefaultAsync(l => l.Id == linkId && l.Course!.UserId == userId);
+
+            if (link == null)
+                return NotFound();
+
+            if (!string.IsNullOrEmpty(dto.Platform))
+                link.Platform = dto.Platform;
+            if (!string.IsNullOrEmpty(dto.Title))
+                link.Title = dto.Title;
+            if (!string.IsNullOrEmpty(dto.Url))
+                link.Url = dto.Url;
+
+            link.Course!.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+
+            return Ok(new ExternalLinkDto
+            {
+                Id = link.Id,
+                Platform = link.Platform,
+                Title = link.Title,
+                Url = link.Url,
+                CreatedAt = link.CreatedAt
+            });
+        }
+
+        [HttpDelete("external-links/{linkId}")]
+        public async Task<IActionResult> DeleteExternalLink(int linkId)
+        {
+            var userId = GetUserId();
+            var link = await _db.ExternalLinks
+                .Include(l => l.Course)
+                .FirstOrDefaultAsync(l => l.Id == linkId && l.Course!.UserId == userId);
+
+            if (link == null)
+                return NotFound();
+
+            link.Course!.UpdatedAt = DateTime.UtcNow;
+            _db.ExternalLinks.Remove(link);
+            await _db.SaveChangesAsync();
+
+            return Ok(new { message = "External link deleted successfully" });
+        }
+
+        // Active Time Tracking
+        [HttpPost("{courseId}/active-time")]
+        public async Task<IActionResult> UpdateActiveTime(int courseId, [FromBody] UpdateActiveTimeDto dto)
+        {
+            var userId = GetUserId();
+            var course = await _db.Courses
+                .FirstOrDefaultAsync(c => c.Id == courseId && c.UserId == userId);
+
+            if (course == null)
+                return NotFound();
+
+            // Update last studied time
+            course.LastStudiedAt = DateTime.UtcNow;
+            course.UpdatedAt = DateTime.UtcNow;
+
+            // Create or update study session for active time tracking
+            var activeSession = await _db.StudySessions
+                .FirstOrDefaultAsync(s => s.CourseId == courseId && !s.IsCompleted && s.EndTime == null);
+
+            if (activeSession != null)
+            {
+                // Update existing session duration
+                var timeDiff = (DateTime.UtcNow - activeSession.StartTime).TotalHours;
+                activeSession.DurationHours = Math.Round((decimal)timeDiff, 2);
+            }
+            else
+            {
+                // Create new session for tracking
+                activeSession = new StudySession
+                {
+                    CourseId = courseId,
+                    StartTime = DateTime.UtcNow.AddHours((double)-dto.Hours),
+                    DurationHours = Math.Round((decimal)dto.Hours, 2),
+                    Notes = "",
+                    IsCompleted = false,
+                    CreatedAt = DateTime.UtcNow
+                };
+                _db.StudySessions.Add(activeSession);
+            }
+
+            // Update course progress based on active time
+            var totalCompletedHours = await _db.StudySessions
+                .Where(s => s.CourseId == courseId && s.IsCompleted)
+                .SumAsync(s => s.DurationHours);
+
+            // Add current active session time
+            totalCompletedHours += activeSession.DurationHours;
+
+            course.HoursRemaining = Math.Max(0, course.TotalEstimatedHours - (int)totalCompletedHours);
+
+            await _db.SaveChangesAsync();
+
+            return Ok(new { 
+                message = "Active time updated",
+                hoursRemaining = course.HoursRemaining,
+                activeTime = activeSession.DurationHours
+            });
+        }
+    }
+
+    // DTOs for module and external link updates
+    public class UpdateModuleDto
+    {
+        public string? Title { get; set; }
+        public string? Description { get; set; }
+        public int? EstimatedHours { get; set; }
+        public string? Notes { get; set; }
+        public int? ParentModuleId { get; set; }
+    }
+
+    public class UpdateExternalLinkDto
+    {
+        public string? Platform { get; set; }
+        public string? Title { get; set; }
+        public string? Url { get; set; }
+    }
+
+    public class UpdateActiveTimeDto
+    {
+        public decimal Hours { get; set; }
     }
 }
 

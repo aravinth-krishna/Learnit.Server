@@ -25,7 +25,11 @@ namespace Learnit.Server.Models
     public class CreateCourseModuleDto
     {
         public string Title { get; set; } = "";
+        public string Description { get; set; } = "";
         public int EstimatedHours { get; set; }
+        public int? ParentModuleId { get; set; }
+        public string Notes { get; set; } = "";
+        public bool IsCompleted { get; set; } = false;
     }
 }
 
