@@ -184,7 +184,7 @@ namespace Learnit.Server.Controllers
 
             var friend = selected.First();
             var friendsSummary = $"Friend {friend.DisplayName}: {friend.CompletionRate}% done, {friend.WeeklyHours}h/wk";
-            var systemPrompt = "You are Learnit AI. Prioritize helping the current user; use the friend only as a benchmark. Deliver concise comparative analysis (user-first) plus next best actions for the user. Keep it friendly and actionable. Return markdown (lists encouraged).";
+            var systemPrompt = "You are Learnit AI. Compare the current user versus one friend as a benchmark. Prioritize the user. Provide: (1) a short comparison of completion % and weekly hours (user vs friend), (2) 3 actionable next steps for the user. Do NOT use tables or markdown tables; use bullets or short paragraphs only. Keep it friendly and concise.";
             var reply = await _provider.GenerateAsync(systemPrompt, "Friend: " + friendsSummary + "\nContext (user):\n" + context, null, cancellationToken);
 
             return Ok(new FriendCompareResponse
