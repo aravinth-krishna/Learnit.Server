@@ -140,7 +140,10 @@ namespace Learnit.Server.Controllers
             var reply = await _provider.GenerateAsync(systemPrompt, request.Prompt + "\nContext:\n" + context, null, cancellationToken);
             return Ok(new AiInsightResponse
             {
-                Insights = SplitBullets(reply)
+                Insights = new List<AiInsight>
+                {
+                    new() { Title = string.Empty, Detail = reply }
+                }
             });
         }
 
@@ -153,7 +156,10 @@ namespace Learnit.Server.Controllers
             var reply = await _provider.GenerateAsync(systemPrompt, request.Prompt + "\nContext:\n" + context, null, cancellationToken);
             return Ok(new AiInsightResponse
             {
-                Insights = SplitBullets(reply)
+                Insights = new List<AiInsight>
+                {
+                    new() { Title = string.Empty, Detail = reply }
+                }
             });
         }
 
@@ -171,19 +177,23 @@ namespace Learnit.Server.Controllers
                     Friends = new List<FriendDto>(),
                     Insights = new List<AiInsight>
                     {
-                        new() { Title = "No friends selected", Detail = "Pick up to two friends to compare." }
+                        new() { Title = "", Detail = "Pick one friend to compare." }
                     }
                 });
             }
 
-            var friendsSummary = string.Join("; ", selected.Select(f => $"{f.DisplayName}: {f.CompletionRate}% done, {f.WeeklyHours}h/wk"));
-            var systemPrompt = "Compare the user to friends and give 3 short suggestions. Keep friendly and actionable.";
-            var reply = await _provider.GenerateAsync(systemPrompt, "Friends: " + friendsSummary + "\nContext:\n" + context, null, cancellationToken);
+            var friend = selected.First();
+            var friendsSummary = $"Friend {friend.DisplayName}: {friend.CompletionRate}% done, {friend.WeeklyHours}h/wk";
+            var systemPrompt = "You are Learnit AI. Prioritize helping the current user; use the friend only as a benchmark. Deliver concise comparative analysis (user-first) plus next best actions for the user. Keep it friendly and actionable. Return markdown (lists encouraged).";
+            var reply = await _provider.GenerateAsync(systemPrompt, "Friend: " + friendsSummary + "\nContext (user):\n" + context, null, cancellationToken);
 
             return Ok(new FriendCompareResponse
             {
                 Friends = selected,
-                Insights = SplitBullets(reply)
+                Insights = new List<AiInsight>
+                {
+                    new() { Title = string.Empty, Detail = reply }
+                }
             });
         }
 
