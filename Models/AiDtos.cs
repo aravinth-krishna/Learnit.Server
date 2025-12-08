@@ -27,10 +27,14 @@ namespace Learnit.Server.Models
     {
         public string Title { get; set; } = "";
         public string Description { get; set; } = "";
+        public string SubjectArea { get; set; } = "";
+        public string LearningObjectives { get; set; } = "";
         public string Difficulty { get; set; } = "Balanced";
         public string Priority { get; set; } = "Medium";
         public int TotalEstimatedHours { get; set; }
             = 10;
+        public string TargetCompletionDate { get; set; } = "";
+        public string Notes { get; set; } = "";
         public List<AiModuleDraft> Modules { get; set; } = new();
     }
 
@@ -46,6 +50,7 @@ namespace Learnit.Server.Models
     {
         public string Title { get; set; } = "";
         public int EstimatedHours { get; set; } = 1;
+        public string Description { get; set; } = "";
     }
 
     public class AiInsightRequest

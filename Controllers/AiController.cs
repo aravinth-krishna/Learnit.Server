@@ -7,6 +7,8 @@ using Microsoft.EntityFrameworkCore;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Linq;
 
 namespace Learnit.Server.Controllers
 {
@@ -58,20 +60,57 @@ namespace Learnit.Server.Controllers
         [HttpPost("create-course")]
         public async Task<ActionResult<AiCourseGenerateResponse>> CreateCourse([FromBody] AiCourseGenerateRequest request, CancellationToken cancellationToken)
         {
-            var systemPrompt = "You draft concise course plans. Respond with strict JSON: {title, description, difficulty, priority, totalEstimatedHours, modules:[{title, description, estimatedHours, subModules:[{title, estimatedHours}]}]}";
+            var systemPrompt = "You draft detailed, user-specific course plans. Respond with JSON ONLY (no prose). Schema: {title, description, subjectArea, learningObjectives (array of 3-6 short goals), difficulty, priority, totalEstimatedHours (int), targetCompletionDate (yyyy-MM-dd), notes, modules:[{title, description, estimatedHours (int), subModules:[{title, description, estimatedHours}]}]}. Honor the user's prompt and customize subjects, goals, and module names/hours to their needs.";
             var reply = await _provider.GenerateAsync(systemPrompt, request.Prompt, null, cancellationToken);
 
+            var parsed = TryParseCourseJson(reply) ?? BuildHeuristicCourse(request.Prompt);
+            return Ok(parsed);
+        }
+
+        private static string ExtractJsonBlock(string reply)
+        {
+            // Attempt to pull a JSON object even if the model added prose around it
             try
             {
-                using var doc = JsonDocument.Parse(reply);
+                var fenceMatch = Regex.Match(reply, "```json\\s*(?<json>{[\\s\\S]*?})\\s*```", RegexOptions.IgnoreCase);
+                if (fenceMatch.Success)
+                    return fenceMatch.Groups["json"].Value;
+
+                var firstBrace = reply.IndexOf('{');
+                var lastBrace = reply.LastIndexOf('}');
+                if (firstBrace >= 0 && lastBrace > firstBrace)
+                    return reply.Substring(firstBrace, lastBrace - firstBrace + 1);
+            }
+            catch
+            {
+                // ignore and fall through
+            }
+
+            return reply;
+        }
+
+        private static AiCourseGenerateResponse? TryParseCourseJson(string reply)
+        {
+            try
+            {
+                var json = ExtractJsonBlock(reply);
+                using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
                 var resp = new AiCourseGenerateResponse
                 {
-                    Title = root.GetProperty("title").GetString() ?? "Generated Course",
-                    Description = root.GetProperty("description").GetString() ?? "",
+                    Title = root.TryGetProperty("title", out var titleEl) ? titleEl.GetString() ?? "Generated Course" : "Generated Course",
+                    Description = root.TryGetProperty("description", out var descEl) ? descEl.GetString() ?? string.Empty : string.Empty,
+                    SubjectArea = root.TryGetProperty("subjectArea", out var subj) ? subj.GetString() ?? string.Empty : string.Empty,
+                    LearningObjectives = root.TryGetProperty("learningObjectives", out var goals)
+                        ? goals.ValueKind == JsonValueKind.Array
+                            ? string.Join("; ", goals.EnumerateArray().Select(x => x.GetString()).Where(x => !string.IsNullOrWhiteSpace(x)))
+                            : goals.GetString() ?? string.Empty
+                        : string.Empty,
                     Difficulty = root.TryGetProperty("difficulty", out var diff) ? diff.GetString() ?? "Balanced" : "Balanced",
                     Priority = root.TryGetProperty("priority", out var pr) ? pr.GetString() ?? "Medium" : "Medium",
                     TotalEstimatedHours = root.TryGetProperty("totalEstimatedHours", out var hrs) ? hrs.GetInt32() : 10,
+                    TargetCompletionDate = root.TryGetProperty("targetCompletionDate", out var tcd) ? tcd.GetString() ?? string.Empty : string.Empty,
+                    Notes = root.TryGetProperty("notes", out var nts) ? nts.GetString() ?? string.Empty : string.Empty,
                     Modules = new List<AiModuleDraft>()
                 };
 
@@ -81,8 +120,8 @@ namespace Learnit.Server.Controllers
                     {
                         var moduleDraft = new AiModuleDraft
                         {
-                            Title = m.GetProperty("title").GetString() ?? "Module",
-                            Description = m.TryGetProperty("description", out var md) ? md.GetString() ?? "" : "",
+                            Title = m.TryGetProperty("title", out var mt) ? mt.GetString() ?? "Module" : "Module",
+                            Description = m.TryGetProperty("description", out var md) ? md.GetString() ?? string.Empty : string.Empty,
                             EstimatedHours = m.TryGetProperty("estimatedHours", out var eh) ? eh.GetInt32() : 2,
                             SubModules = new List<AiSubModuleDraft>()
                         };
@@ -94,7 +133,8 @@ namespace Learnit.Server.Controllers
                                 moduleDraft.SubModules.Add(new AiSubModuleDraft
                                 {
                                     Title = s.TryGetProperty("title", out var st) ? st.GetString() ?? "Submodule" : "Submodule",
-                                    EstimatedHours = s.TryGetProperty("estimatedHours", out var sh) ? sh.GetInt32() : 1
+                                    EstimatedHours = s.TryGetProperty("estimatedHours", out var sh) ? sh.GetInt32() : 1,
+                                    Description = s.TryGetProperty("description", out var sd) ? sd.GetString() ?? string.Empty : string.Empty
                                 });
                             }
                         }
@@ -108,27 +148,92 @@ namespace Learnit.Server.Controllers
                     resp.Modules.Add(new AiModuleDraft { Title = "Module 1", EstimatedHours = 2 });
                 }
 
-                return Ok(resp);
+                return resp;
             }
             catch
             {
-                // Fallback simple draft if parsing fails
-                var fallback = new AiCourseGenerateResponse
-                {
-                    Title = "Generated Course",
-                    Description = "AI generated course plan.",
-                    Difficulty = "Balanced",
-                    Priority = "Medium",
-                    TotalEstimatedHours = 10,
-                    Modules = new List<AiModuleDraft>
-                    {
-                        new() { Title = "Foundations", EstimatedHours = 3 },
-                        new() { Title = "Practice", EstimatedHours = 3 },
-                        new() { Title = "Project", EstimatedHours = 4 }
-                    }
-                };
-                return Ok(fallback);
+                return null;
             }
+        }
+
+        private static AiCourseGenerateResponse BuildHeuristicCourse(string prompt)
+        {
+            // Basic heuristic draft when LLM output is unusable or stubbed
+            var trimmed = (prompt ?? string.Empty).Trim();
+            var subjectTokens = string.IsNullOrWhiteSpace(trimmed)
+                ? Array.Empty<string>()
+                : trimmed.Split(new[] { ' ', ',', ';', '.' }, StringSplitOptions.RemoveEmptyEntries).Take(4).ToArray();
+            var subject = subjectTokens.Length == 0 ? "Custom Course" : string.Join(" ", subjectTokens);
+
+            string TitleFromPrompt()
+            {
+                if (string.IsNullOrWhiteSpace(trimmed)) return "Tailored Course Plan";
+                var words = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Take(10);
+                var title = string.Join(' ', words);
+                return title.Length > 4 ? title : "Tailored Course Plan";
+            }
+
+            var goals = new[]
+            {
+                $"Understand the fundamentals of {subject}",
+                $"Apply {subject} in hands-on exercises",
+                $"Deliver a small project using {subject}"
+            };
+
+            var now = DateTime.UtcNow;
+            return new AiCourseGenerateResponse
+            {
+                Title = TitleFromPrompt(),
+                Description = string.IsNullOrWhiteSpace(trimmed)
+                    ? "Auto-generated plan based on your request."
+                    : trimmed,
+                SubjectArea = subject,
+                LearningObjectives = string.Join("; ", goals),
+                Difficulty = "Balanced",
+                Priority = "Medium",
+                TotalEstimatedHours = 24,
+                TargetCompletionDate = now.AddDays(28).ToString("yyyy-MM-dd"),
+                Notes = "Heuristic plan generated because AI response was not structured JSON.",
+                Modules = new List<AiModuleDraft>
+                {
+                    new()
+                    {
+                        Title = $"Foundations: {subject}",
+                        Description = "Key concepts, terminology, and setup.",
+                        EstimatedHours = 6,
+                        SubModules = new List<AiSubModuleDraft>
+                        {
+                            new() { Title = "Basics", EstimatedHours = 2, Description = "Core principles" },
+                            new() { Title = "Setup", EstimatedHours = 2, Description = "Environment and tooling" },
+                            new() { Title = "First steps", EstimatedHours = 2, Description = "Hello world and simple task" }
+                        }
+                    },
+                    new()
+                    {
+                        Title = $"Practice: {subject}",
+                        Description = "Apply skills with guided exercises.",
+                        EstimatedHours = 8,
+                        SubModules = new List<AiSubModuleDraft>
+                        {
+                            new() { Title = "Core exercises", EstimatedHours = 3, Description = "Hands-on drills" },
+                            new() { Title = "Patterns", EstimatedHours = 3, Description = "Common approaches" },
+                            new() { Title = "Review", EstimatedHours = 2, Description = "Checkpoint and feedback" }
+                        }
+                    },
+                    new()
+                    {
+                        Title = $"Project: {subject}",
+                        Description = "Build a small project to consolidate learning.",
+                        EstimatedHours = 10,
+                        SubModules = new List<AiSubModuleDraft>
+                        {
+                            new() { Title = "Plan", EstimatedHours = 2, Description = "Define scope" },
+                            new() { Title = "Build", EstimatedHours = 6, Description = "Implement features" },
+                            new() { Title = "Polish", EstimatedHours = 2, Description = "Test and refine" }
+                        }
+                    }
+                }
+            };
         }
 
         [HttpPost("schedule-insights")]
