@@ -210,45 +210,101 @@ namespace Learnit.Server.Controllers
             var events = new List<ScheduleEvent>();
             var currentTime = request.StartDateTime ?? DateTime.UtcNow;
 
-            // Simple scheduling algorithm: schedule during business hours
+            // Parameters for realistic scheduling
+            const int workdayStartHour = 9;
+            const int workdayEndHour = 18; // hard stop
+            const int maxDailyHours = 6;
+            const int maxBlockHours = 2; // keep sessions manageable
+            const int bufferMinutes = 30; // gap between blocks
+
+            // Track hours booked per day to avoid full-day stacking
+            DateTime currentDay = currentTime.Date;
+            double currentDayHours = 0;
+
+            DateTime AlignToWorkday(DateTime dt)
+            {
+                var aligned = dt;
+
+                // Skip to next weekday if on weekend
+                while (aligned.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+                {
+                    aligned = aligned.AddDays(1).Date.AddHours(workdayStartHour);
+                }
+
+                // Before start -> set to start; after end -> next day start
+                if (aligned.Hour < workdayStartHour)
+                {
+                    aligned = aligned.Date.AddHours(workdayStartHour);
+                }
+                else if (aligned.Hour >= workdayEndHour)
+                {
+                    aligned = aligned.AddDays(1).Date.AddHours(workdayStartHour);
+                }
+
+                return aligned;
+            }
+
+            currentTime = AlignToWorkday(currentTime);
+            currentDay = currentTime.Date;
+
             foreach (var module in modulesToSchedule)
             {
-                // Skip weekends if not requested
-                while (currentTime.DayOfWeek == DayOfWeek.Saturday || currentTime.DayOfWeek == DayOfWeek.Sunday)
+                double remainingHours = Math.Max(1, module.EstimatedHours);
+
+                while (remainingHours > 0)
                 {
-                    currentTime = currentTime.AddDays(1).Date.AddHours(9); // Monday 9 AM
+                    // Reset daily counters if we moved to a new day
+                    if (currentTime.Date != currentDay)
+                    {
+                        currentDay = currentTime.Date;
+                        currentDayHours = 0;
+                        currentTime = AlignToWorkday(currentTime);
+                    }
+
+                    // If we've hit the daily cap, move to next day start
+                    if (currentDayHours >= maxDailyHours)
+                    {
+                        currentTime = AlignToWorkday(currentTime.AddDays(1));
+                        continue;
+                    }
+
+                    // Ensure we are inside work hours
+                    currentTime = AlignToWorkday(currentTime);
+
+                    // Available time today before hard stop and daily cap
+                    var hoursUntilDayEnd = (workdayEndHour - currentTime.Hour) - (currentTime.Minute > 0 ? 1 : 0);
+                    var availableToday = Math.Min(hoursUntilDayEnd, maxDailyHours - currentDayHours);
+
+                    if (availableToday <= 0)
+                    {
+                        currentTime = AlignToWorkday(currentTime.AddDays(1));
+                        continue;
+                    }
+
+                    var blockHours = Math.Min(Math.Min(maxBlockHours, availableToday), remainingHours);
+
+                    var endTime = currentTime.AddHours(blockHours);
+
+                    var scheduleEvent = new ScheduleEvent
+                    {
+                        UserId = userId,
+                        Title = $"{module.Course!.Title} - {module.Title}",
+                        StartUtc = currentTime,
+                        EndUtc = endTime,
+                        AllDay = false,
+                        CourseModuleId = module.Id,
+                        CreatedAt = DateTime.UtcNow,
+                        UpdatedAt = DateTime.UtcNow
+                    };
+
+                    events.Add(scheduleEvent);
+
+                    remainingHours -= blockHours;
+                    currentDayHours += blockHours;
+
+                    // Add buffer before next block
+                    currentTime = endTime.AddMinutes(bufferMinutes);
                 }
-
-                // If after 5 PM, move to next day 9 AM
-                if (currentTime.Hour >= 17)
-                {
-                    currentTime = currentTime.AddDays(1).Date.AddHours(9);
-                }
-
-                // If before 9 AM, set to 9 AM
-                if (currentTime.Hour < 9)
-                {
-                    currentTime = currentTime.Date.AddHours(9);
-                }
-
-                var endTime = currentTime.AddHours(module.EstimatedHours);
-
-                var scheduleEvent = new ScheduleEvent
-                {
-                    UserId = userId,
-                    Title = $"{module.Course!.Title} - {module.Title}",
-                    StartUtc = currentTime,
-                    EndUtc = endTime,
-                    AllDay = false,
-                    CourseModuleId = module.Id,
-                    CreatedAt = DateTime.UtcNow,
-                    UpdatedAt = DateTime.UtcNow
-                };
-
-                events.Add(scheduleEvent);
-
-                // Move to next available slot (add some buffer time)
-                currentTime = endTime.AddHours(1); // 1 hour break
             }
 
             if (events.Any())
