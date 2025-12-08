@@ -34,6 +34,79 @@ namespace Learnit.Server.Controllers
             return userId;
         }
 
+        private record CourseProgressSnapshot(
+            int TotalModules,
+            int CompletedModules,
+            decimal ProgressPercentage,
+            decimal ScheduledHours,
+            decimal CompletedHours,
+            decimal HoursRemaining);
+
+        private async Task<Dictionary<int, decimal>> GetScheduledHoursByCourse(int userId, IEnumerable<int> courseIds)
+        {
+            var ids = courseIds.ToList();
+            if (!ids.Any()) return new();
+
+            return await _db.ScheduleEvents
+                .Where(e => e.UserId == userId && e.CourseModuleId.HasValue && e.EndUtc.HasValue)
+                .Include(e => e.CourseModule)
+                .Where(e => e.CourseModule != null && ids.Contains(e.CourseModule!.CourseId))
+                .GroupBy(e => e.CourseModule!.CourseId)
+                .Select(g => new
+                {
+                    CourseId = g.Key,
+                    Hours = g.Sum(e => (decimal)(e.EndUtc!.Value - e.StartUtc).TotalHours)
+                })
+                .ToDictionaryAsync(k => k.CourseId, v => v.Hours);
+        }
+
+        private async Task<Dictionary<int, decimal>> GetCompletedStudyHoursByCourse(int userId, IEnumerable<int> courseIds)
+        {
+            var ids = courseIds.ToList();
+            if (!ids.Any()) return new();
+
+            return await _db.StudySessions
+                .Where(s => s.IsCompleted && ids.Contains(s.CourseId))
+                .Join(_db.Courses.Where(c => c.UserId == userId), s => s.CourseId, c => c.Id,
+                    (s, _) => new { s.CourseId, s.DurationHours })
+                .GroupBy(x => x.CourseId)
+                .Select(g => new { CourseId = g.Key, Hours = g.Sum(x => x.DurationHours) })
+                .ToDictionaryAsync(k => k.CourseId, v => v.Hours);
+        }
+
+        private CourseProgressSnapshot BuildCourseProgressSnapshot(
+            Course course,
+            IReadOnlyDictionary<int, decimal> scheduledLookup,
+            IReadOnlyDictionary<int, decimal> completedLookup)
+        {
+            var totalModules = course.Modules.Count;
+            var completedModules = course.Modules.Count(m => m.IsCompleted);
+            var totalEstimated = course.Modules.Sum(m => m.EstimatedHours);
+            var completedEstimated = course.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
+
+            var progressPct = totalModules > 0
+                ? Math.Round((decimal)completedModules * 100 / totalModules, 1)
+                : 0;
+
+            var scheduledHours = scheduledLookup.TryGetValue(course.Id, out var sh) ? sh : 0;
+            var completedHours = completedLookup.TryGetValue(course.Id, out var ch) ? ch : 0;
+            var hoursRemaining = Math.Max(0, totalEstimated - completedEstimated);
+
+            return new CourseProgressSnapshot(
+                totalModules,
+                completedModules,
+                progressPct,
+                scheduledHours,
+                completedHours,
+                hoursRemaining);
+        }
+
+        private static int CalculateHoursRemainingFromModules(Course course)
+        {
+            var completedEstimated = course.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
+            return Math.Max(0, course.TotalEstimatedHours - completedEstimated);
+        }
+
         [HttpGet]
         public async Task<IActionResult> GetCourses(
             [FromQuery] string? search,
@@ -107,67 +180,81 @@ namespace Learnit.Server.Controllers
 
             var courses = await query.ToListAsync();
 
-            var response = courses.Select(c => new CourseResponseDto
+            var courseIds = courses.Select(c => c.Id).ToList();
+            var scheduledLookup = await GetScheduledHoursByCourse(userId, courseIds);
+            var completedLookup = await GetCompletedStudyHoursByCourse(userId, courseIds);
+
+            var response = courses.Select(c =>
             {
-                Id = c.Id,
-                Title = c.Title,
-                Description = c.Description,
-                SubjectArea = c.SubjectArea,
-                LearningObjectives = c.LearningObjectives,
-                Difficulty = c.Difficulty,
-                Priority = c.Priority,
-                TotalEstimatedHours = c.TotalEstimatedHours,
-                HoursRemaining = c.HoursRemaining,
-                TargetCompletionDate = c.TargetCompletionDate,
-                CreatedAt = c.CreatedAt,
-                UpdatedAt = c.UpdatedAt,
-                Notes = c.Notes,
-                IsActive = c.IsActive,
-                LastStudiedAt = c.LastStudiedAt,
-                Modules = c.Modules.OrderBy(m => m.Order).Select(m => new CourseModuleDto
+                var snapshot = BuildCourseProgressSnapshot(c, scheduledLookup, completedLookup);
+
+                return new CourseResponseDto
                 {
-                    Id = m.Id,
-                    Title = m.Title,
-                    Description = m.Description,
-                    EstimatedHours = m.EstimatedHours,
-                    Order = m.Order,
-                    Notes = m.Notes,
-                    IsCompleted = m.IsCompleted,
-                    SubModules = m.SubModules
-                        .OrderBy(sm => sm.Order)
-                        .Select(sm => new CourseSubModuleDto
-                        {
-                            Id = sm.Id,
-                            Title = sm.Title,
-                            Description = sm.Description,
-                            EstimatedHours = sm.EstimatedHours,
-                            Order = sm.Order,
-                            Notes = sm.Notes,
-                            IsCompleted = sm.IsCompleted
-                        }).ToList()
-                }).ToList(),
-                ExternalLinks = c.ExternalLinks.Select(l => new ExternalLinkDto
-                {
-                    Id = l.Id,
-                    Platform = l.Platform,
-                    Title = l.Title,
-                    Url = l.Url,
-                    CreatedAt = l.CreatedAt
-                }).ToList(),
-                ActiveSession = c.StudySessions
-                    .Where(s => !s.IsCompleted && s.EndTime == null)
-                    .OrderByDescending(s => s.StartTime)
-                    .Select(s => new StudySessionDto
+                    Id = c.Id,
+                    Title = c.Title,
+                    Description = c.Description,
+                    SubjectArea = c.SubjectArea,
+                    LearningObjectives = c.LearningObjectives,
+                    Difficulty = c.Difficulty,
+                    Priority = c.Priority,
+                    TotalEstimatedHours = c.TotalEstimatedHours,
+                    HoursRemaining = (int)snapshot.HoursRemaining,
+                    TotalModules = snapshot.TotalModules,
+                    CompletedModules = snapshot.CompletedModules,
+                    ProgressPercentage = snapshot.ProgressPercentage,
+                    ScheduledHours = snapshot.ScheduledHours,
+                    CompletedHours = snapshot.CompletedHours,
+                    TargetCompletionDate = c.TargetCompletionDate,
+                    CreatedAt = c.CreatedAt,
+                    UpdatedAt = c.UpdatedAt,
+                    Notes = c.Notes,
+                    IsActive = c.IsActive,
+                    LastStudiedAt = c.LastStudiedAt,
+                    Modules = c.Modules.OrderBy(m => m.Order).Select(m => new CourseModuleDto
                     {
-                        Id = s.Id,
-                        CourseModuleId = s.CourseModuleId,
-                        StartTime = s.StartTime,
-                        EndTime = s.EndTime,
-                        DurationHours = s.DurationHours,
-                        Notes = s.Notes,
-                        IsCompleted = s.IsCompleted
-                    })
-                    .FirstOrDefault()
+                        Id = m.Id,
+                        Title = m.Title,
+                        Description = m.Description,
+                        EstimatedHours = m.EstimatedHours,
+                        Order = m.Order,
+                        Notes = m.Notes,
+                        IsCompleted = m.IsCompleted,
+                        SubModules = m.SubModules
+                            .OrderBy(sm => sm.Order)
+                            .Select(sm => new CourseSubModuleDto
+                            {
+                                Id = sm.Id,
+                                Title = sm.Title,
+                                Description = sm.Description,
+                                EstimatedHours = sm.EstimatedHours,
+                                Order = sm.Order,
+                                Notes = sm.Notes,
+                                IsCompleted = sm.IsCompleted
+                            }).ToList()
+                    }).ToList(),
+                    ExternalLinks = c.ExternalLinks.Select(l => new ExternalLinkDto
+                    {
+                        Id = l.Id,
+                        Platform = l.Platform,
+                        Title = l.Title,
+                        Url = l.Url,
+                        CreatedAt = l.CreatedAt
+                    }).ToList(),
+                    ActiveSession = c.StudySessions
+                        .Where(s => !s.IsCompleted && s.EndTime == null)
+                        .OrderByDescending(s => s.StartTime)
+                        .Select(s => new StudySessionDto
+                        {
+                            Id = s.Id,
+                            CourseModuleId = s.CourseModuleId,
+                            StartTime = s.StartTime,
+                            EndTime = s.EndTime,
+                            DurationHours = s.DurationHours,
+                            Notes = s.Notes,
+                            IsCompleted = s.IsCompleted
+                        })
+                        .FirstOrDefault()
+                };
             }).ToList();
 
             return Ok(response);
@@ -187,6 +274,10 @@ namespace Learnit.Server.Controllers
             if (course == null)
                 return NotFound();
 
+            var scheduledLookup = await GetScheduledHoursByCourse(userId, new[] { course.Id });
+            var completedLookup = await GetCompletedStudyHoursByCourse(userId, new[] { course.Id });
+            var snapshot = BuildCourseProgressSnapshot(course, scheduledLookup, completedLookup);
+
             var response = new CourseResponseDto
             {
                 Id = course.Id,
@@ -197,7 +288,12 @@ namespace Learnit.Server.Controllers
                 Difficulty = course.Difficulty,
                 Priority = course.Priority,
                 TotalEstimatedHours = course.TotalEstimatedHours,
-                HoursRemaining = course.HoursRemaining,
+                HoursRemaining = (int)snapshot.HoursRemaining,
+                TotalModules = snapshot.TotalModules,
+                CompletedModules = snapshot.CompletedModules,
+                ProgressPercentage = snapshot.ProgressPercentage,
+                ScheduledHours = snapshot.ScheduledHours,
+                CompletedHours = snapshot.CompletedHours,
                 TargetCompletionDate = course.TargetCompletionDate,
                 CreatedAt = course.CreatedAt,
                 UpdatedAt = course.UpdatedAt,
@@ -358,6 +454,12 @@ namespace Learnit.Server.Controllers
                 .Include(c => c.ExternalLinks)
                 .FirstOrDefaultAsync(c => c.Id == course.Id);
 
+            if (course != null)
+            {
+                course.HoursRemaining = CalculateHoursRemainingFromModules(course);
+                await _db.SaveChangesAsync();
+            }
+
             var response = new CourseResponseDto
             {
                 Id = course!.Id,
@@ -516,10 +618,10 @@ namespace Learnit.Server.Controllers
 
                 sub.IsCompleted = !sub.IsCompleted;
                 var course = sub.CourseModule!.Course!;
-                var completedHours = await _db.StudySessions
-                    .Where(s => s.CourseId == course.Id && s.IsCompleted)
-                    .SumAsync(s => s.DurationHours);
-                course.HoursRemaining = Math.Max(0, course.TotalEstimatedHours - (int)completedHours);
+                await _db.Entry(course).Collection(c => c.Modules).LoadAsync();
+                var completedEstimated = course.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
+                course.HoursRemaining = Math.Max(0, course.TotalEstimatedHours - completedEstimated);
+                course.UpdatedAt = DateTime.UtcNow;
                 await _db.SaveChangesAsync();
                 return Ok(new { sub.IsCompleted, course.HoursRemaining });
             }
@@ -527,10 +629,10 @@ namespace Learnit.Server.Controllers
             module.IsCompleted = !module.IsCompleted;
 
             var parentCourse = module.Course!;
-            var moduleCompletedHours = await _db.StudySessions
-                .Where(s => s.CourseId == parentCourse.Id && s.IsCompleted)
-                .SumAsync(s => s.DurationHours);
-            parentCourse.HoursRemaining = Math.Max(0, parentCourse.TotalEstimatedHours - (int)moduleCompletedHours);
+            await _db.Entry(parentCourse).Collection(c => c.Modules).LoadAsync();
+            var completedEstimatedHours = parentCourse.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
+            parentCourse.HoursRemaining = Math.Max(0, parentCourse.TotalEstimatedHours - completedEstimatedHours);
+            parentCourse.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
 
@@ -561,12 +663,6 @@ namespace Learnit.Server.Controllers
             course.TargetCompletionDate = EnsureUtc(dto.TargetCompletionDate);
             course.Notes = dto.Notes;
             course.UpdatedAt = DateTime.UtcNow;
-
-            // Update hours remaining based on completed sessions
-            var completedHours = await _db.StudySessions
-                .Where(s => s.CourseId == id && s.IsCompleted)
-                .SumAsync(s => s.DurationHours);
-            course.HoursRemaining = Math.Max(0, course.TotalEstimatedHours - (int)completedHours);
 
             // Replace modules and submodules
             _db.CourseSubModules.RemoveRange(course.Modules.SelectMany(m => m.SubModules));
@@ -628,6 +724,8 @@ namespace Learnit.Server.Controllers
                 };
                 _db.ExternalLinks.Add(link);
             }
+
+            course.HoursRemaining = CalculateHoursRemainingFromModules(course);
 
             await _db.SaveChangesAsync();
 

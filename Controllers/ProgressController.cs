@@ -38,87 +38,101 @@ namespace Learnit.Server.Controllers
         {
             var userId = GetUserId();
 
-            // Get current week data (last 7 days)
-            var weekStart = DateTime.UtcNow.Date.AddDays(-6); // 7 days ago
-            var weekEnd = DateTime.UtcNow.Date.AddDays(1); // Tomorrow
+            var weekStart = DateTime.UtcNow.Date.AddDays(-6);
+            var weekEnd = DateTime.UtcNow.Date.AddDays(1);
 
-            // Get scheduled vs completed for the week (keep scheduled; completed based on module completion hours)
+            var userCourseIds = await _db.Courses
+                .Where(c => c.UserId == userId)
+                .Select(c => c.Id)
+                .ToListAsync();
+
             var weeklyEvents = await _db.ScheduleEvents
                 .Where(e => e.UserId == userId &&
                            e.StartUtc >= weekStart &&
-                           e.StartUtc < weekEnd)
+                           e.StartUtc < weekEnd &&
+                           e.EndUtc.HasValue)
                 .ToListAsync();
 
-            // Precompute completed hours from modules (estimated hours of completed modules)
-            var moduleCompletionHours = await _db.CourseModules
-                .Where(m => m.Course!.UserId == userId && m.IsCompleted)
-                .SumAsync(m => (decimal)m.EstimatedHours);
+            var weeklySessions = await _db.StudySessions
+                .Where(s => s.IsCompleted && userCourseIds.Contains(s.CourseId) &&
+                            s.StartTime.Date >= weekStart && s.StartTime.Date < weekEnd)
+                .ToListAsync();
 
             var weeklyData = new List<WeeklyDataPoint>();
             for (int i = 6; i >= 0; i--)
             {
                 var date = DateTime.UtcNow.Date.AddDays(-i);
-                var dayEvents = weeklyEvents.Where(e => e.StartUtc.Date == date).ToList();
 
-                var scheduled = dayEvents.Sum(e => e.EndUtc.HasValue
-                    ? (decimal)(e.EndUtc.Value - e.StartUtc).TotalHours
-                    : 0);
+                var scheduled = weeklyEvents
+                    .Where(e => e.StartUtc.Date == date)
+                    .Sum(e => (decimal)(e.EndUtc!.Value - e.StartUtc).TotalHours);
 
-                // Spread completed hours evenly across days as a simple visual (better: track completion timestamps)
-                var completed = weeklyEvents.Count > 0
-                    ? moduleCompletionHours / weeklyEvents.Count
-                    : moduleCompletionHours;
+                var completed = weeklySessions
+                    .Where(s => s.StartTime.Date == date)
+                    .Sum(s => s.DurationHours);
 
                 weeklyData.Add(new WeeklyDataPoint
                 {
                     Day = date.ToString("ddd"),
-                    Scheduled = (decimal)Math.Round((double)scheduled, 1),
-                    Completed = (decimal)Math.Round((double)completed, 1)
+                    Scheduled = Math.Round(scheduled, 1),
+                    Completed = Math.Round(completed, 1)
                 });
             }
 
-            // Calculate streaks (simplified - based on having any activity each day)
             var currentStreak = await CalculateCurrentStreak(userId);
             var longestStreak = await CalculateLongestStreak(userId);
 
-            // Calculate totals
             var totalScheduled = weeklyData.Sum(d => d.Scheduled);
             var totalCompleted = weeklyData.Sum(d => d.Completed);
             var completionRate = totalScheduled > 0 ? (totalCompleted / totalScheduled) * 100 : 0;
-            var efficiency = Math.Min(100, completionRate * 1.1m); // Simple efficiency calculation
+            var efficiency = Math.Min(100, completionRate);
 
-            // Get course progress
             var courses = await _db.Courses
                 .Include(c => c.Modules)
                 .Where(c => c.UserId == userId)
                 .ToListAsync();
 
+            var scheduledLookup = await _db.ScheduleEvents
+                .Where(e => e.UserId == userId && e.CourseModuleId.HasValue && e.EndUtc.HasValue)
+                .Include(e => e.CourseModule)
+                .Where(e => e.CourseModule != null)
+                .GroupBy(e => e.CourseModule!.CourseId)
+                .Select(g => new { CourseId = g.Key, Hours = g.Sum(e => (decimal)(e.EndUtc!.Value - e.StartUtc).TotalHours) })
+                .ToDictionaryAsync(k => k.CourseId, v => v.Hours);
+
+            var completedLookup = await _db.StudySessions
+                .Where(s => s.IsCompleted && userCourseIds.Contains(s.CourseId))
+                .GroupBy(s => s.CourseId)
+                .Select(g => new { CourseId = g.Key, Hours = g.Sum(s => s.DurationHours) })
+                .ToDictionaryAsync(k => k.CourseId, v => v.Hours);
+
             var courseProgress = courses.Select(c =>
             {
                 var totalModules = c.Modules.Count;
                 var completedModules = c.Modules.Count(m => m.IsCompleted);
-                var completedHours = c.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
+                var completedEstimated = c.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
                 var totalHours = c.Modules.Sum(m => m.EstimatedHours);
                 var progressPct = totalModules > 0
                     ? (decimal)Math.Round((double)completedModules * 100 / totalModules, 1)
                     : 0;
+
+                var scheduledHours = scheduledLookup.TryGetValue(c.Id, out var sh) ? sh : 0;
+                var completedHours = completedLookup.TryGetValue(c.Id, out var ch) ? ch : 0;
 
                 return new CourseProgressDto
                 {
                     Id = c.Id,
                     Title = c.Title,
                     TotalHours = totalHours,
-                    CompletedHours = completedHours,
+                    CompletedHours = completedHours > 0 ? completedHours : completedEstimated,
                     ProgressPercentage = progressPct
                 };
             }).ToList();
 
-            // Calculate overall progress
             var overallProgress = courseProgress.Any()
                 ? courseProgress.Average(c => c.ProgressPercentage)
                 : 0;
 
-            // Generate heatmap data (last 60 days)
             var heatmapData = await GenerateHeatmapData(userId);
 
             var dashboard = new ProgressDashboardDto
@@ -127,11 +141,11 @@ namespace Learnit.Server.Controllers
                 {
                     CurrentStreak = currentStreak,
                     LongestStreak = longestStreak,
-                    TotalScheduledHours = (decimal)Math.Round((double)totalScheduled, 1),
-                    TotalCompletedHours = (decimal)Math.Round((double)totalCompleted, 1),
-                    CompletionRate = (decimal)Math.Round((double)completionRate, 1),
-                    Efficiency = (decimal)Math.Round((double)efficiency, 1),
-                    OverallProgress = (decimal)Math.Round((double)overallProgress, 1),
+                    TotalScheduledHours = Math.Round(totalScheduled, 1),
+                    TotalCompletedHours = Math.Round(totalCompleted, 1),
+                    CompletionRate = Math.Round((decimal)completionRate, 1),
+                    Efficiency = Math.Round((decimal)efficiency, 1),
+                    OverallProgress = Math.Round((decimal)overallProgress, 1),
                     LastUpdated = DateTime.UtcNow
                 },
                 WeeklyData = weeklyData,
@@ -151,9 +165,10 @@ namespace Learnit.Server.Controllers
             for (int i = 0; i < 30; i++)
             {
                 var date = today.AddDays(-i);
-                var hasActivity = await _db.ScheduleEvents
-                    .AnyAsync(e => e.UserId == userId &&
-                                  e.StartUtc.Date == date);
+                var hasActivity = await _db.StudySessions
+                    .Join(_db.Courses.Where(c => c.UserId == userId), s => s.CourseId, c => c.Id,
+                        (s, _) => s)
+                    .AnyAsync(s => s.IsCompleted && s.StartTime.Date == date);
 
                 if (hasActivity)
                 {
@@ -190,12 +205,12 @@ namespace Learnit.Server.Controllers
             {
                 var date = today.AddDays(-i);
 
-                // Calculate activity level based on hours scheduled
-                var dailyHours = await _db.ScheduleEvents
-                    .Where(e => e.UserId == userId && e.StartUtc.Date == date)
-                    .SumAsync(e => e.EndUtc.HasValue
-                        ? (decimal)(e.EndUtc.Value - e.StartUtc).TotalHours
-                        : 0);
+                // Calculate activity level based on completed study session hours
+                var dailyHours = await _db.StudySessions
+                    .Join(_db.Courses.Where(c => c.UserId == userId), s => s.CourseId, c => c.Id,
+                        (s, _) => s)
+                    .Where(s => s.IsCompleted && s.StartTime.Date == date)
+                    .SumAsync(s => s.DurationHours);
 
                 int activityLevel;
                 if (dailyHours == 0) activityLevel = 0;

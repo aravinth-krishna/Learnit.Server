@@ -11,6 +11,11 @@ namespace Learnit.Server.Models
         public string Priority { get; set; } = "";
         public int TotalEstimatedHours { get; set; }
         public int HoursRemaining { get; set; }
+        public int TotalModules { get; set; }
+        public int CompletedModules { get; set; }
+        public decimal ProgressPercentage { get; set; }
+        public decimal ScheduledHours { get; set; }
+        public decimal CompletedHours { get; set; }
         public DateTime? TargetCompletionDate { get; set; }
         public DateTime CreatedAt { get; set; }
         public DateTime UpdatedAt { get; set; }
