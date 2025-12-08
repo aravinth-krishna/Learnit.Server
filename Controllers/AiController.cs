@@ -18,12 +18,14 @@ namespace Learnit.Server.Controllers
         private readonly IAiProvider _provider;
         private readonly AiContextBuilder _contextBuilder;
         private readonly AppDbContext _db;
+        private readonly FriendService _friends;
 
-        public AiController(IAiProvider provider, AiContextBuilder contextBuilder, AppDbContext db)
+        public AiController(IAiProvider provider, AiContextBuilder contextBuilder, AppDbContext db, FriendService friends)
         {
             _provider = provider;
             _contextBuilder = contextBuilder;
             _db = db;
+            _friends = friends;
         }
 
         private int GetUserId()
@@ -156,17 +158,31 @@ namespace Learnit.Server.Controllers
         }
 
         [HttpPost("compare")]
-        public async Task<ActionResult<FriendCompareResponse>> Compare([FromBody] List<FriendDto> friends, CancellationToken cancellationToken)
+        public async Task<ActionResult<FriendCompareResponse>> Compare([FromBody] FriendCompareRequest request, CancellationToken cancellationToken)
         {
             var userId = GetUserId();
             var context = await _contextBuilder.BuildContextAsync(userId, cancellationToken);
-            var friendsSummary = string.Join("; ", friends.Select(f => $"{f.DisplayName}: {f.CompletionRate}% done, {f.WeeklyHours}h/wk"));
+
+            var selected = await _friends.GetFriendsByIdsAsync(userId, request.FriendIds.Take(2), cancellationToken);
+            if (selected.Count == 0)
+            {
+                return Ok(new FriendCompareResponse
+                {
+                    Friends = new List<FriendDto>(),
+                    Insights = new List<AiInsight>
+                    {
+                        new() { Title = "No friends selected", Detail = "Pick up to two friends to compare." }
+                    }
+                });
+            }
+
+            var friendsSummary = string.Join("; ", selected.Select(f => $"{f.DisplayName}: {f.CompletionRate}% done, {f.WeeklyHours}h/wk"));
             var systemPrompt = "Compare the user to friends and give 3 short suggestions. Keep friendly and actionable.";
             var reply = await _provider.GenerateAsync(systemPrompt, "Friends: " + friendsSummary + "\nContext:\n" + context, null, cancellationToken);
 
             return Ok(new FriendCompareResponse
             {
-                Friends = friends,
+                Friends = selected,
                 Insights = SplitBullets(reply)
             });
         }

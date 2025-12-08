@@ -71,6 +71,7 @@ namespace Learnit.Server.Models
         public string Id { get; set; } = Guid.NewGuid().ToString();
         public string DisplayName { get; set; } = "";
         public string Email { get; set; } = "";
+        public int FriendUserId { get; set; }
         public decimal CompletionRate { get; set; }
             = 0;
         public decimal WeeklyHours { get; set; }
@@ -81,5 +82,10 @@ namespace Learnit.Server.Models
     {
         public List<FriendDto> Friends { get; set; } = new();
         public List<AiInsight> Insights { get; set; } = new();
+    }
+
+    public class FriendCompareRequest
+    {
+        public List<string> FriendIds { get; set; } = new();
     }
 }

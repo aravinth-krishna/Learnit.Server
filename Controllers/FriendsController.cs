@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using Learnit.Server.Models;
+using Learnit.Server.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -12,7 +13,12 @@ namespace Learnit.Server.Controllers
     [Authorize]
     public class FriendsController : ControllerBase
     {
-        private static readonly ConcurrentDictionary<int, List<FriendDto>> Store = new();
+        private readonly FriendService _friends;
+
+        public FriendsController(FriendService friends)
+        {
+            _friends = friends;
+        }
 
         private int GetUserId()
         {
@@ -29,25 +35,33 @@ namespace Learnit.Server.Controllers
         public ActionResult<List<FriendDto>> List()
         {
             var userId = GetUserId();
-            return Ok(Store.GetOrAdd(userId, _ => new List<FriendDto>()));
+            var friends = _friends.GetFriendsAsync(userId).GetAwaiter().GetResult();
+            return Ok(friends);
         }
 
         [HttpPost]
         public ActionResult<FriendDto> Add([FromBody] FriendDto friend)
         {
             var userId = GetUserId();
-            var list = Store.GetOrAdd(userId, _ => new List<FriendDto>());
-            friend.Id = Guid.NewGuid().ToString();
-            list.Add(friend);
-            return Ok(friend);
+            if (string.IsNullOrWhiteSpace(friend.Email))
+                return BadRequest("Email is required to add a friend.");
+
+            try
+            {
+                var added = _friends.AddFriendAsync(userId, friend.Email).GetAwaiter().GetResult();
+                return Ok(added);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(ex.Message);
+            }
         }
 
         [HttpDelete("{id}")]
         public IActionResult Delete(string id)
         {
             var userId = GetUserId();
-            if (!Store.TryGetValue(userId, out var list)) return NotFound();
-            var removed = list.RemoveAll(f => f.Id == id) > 0;
+            var removed = _friends.RemoveFriend(userId, id);
             return removed ? Ok() : NotFound();
         }
     }
