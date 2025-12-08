@@ -269,9 +269,11 @@ namespace Learnit.Server.Controllers
             await _db.SaveChangesAsync();
 
             // Add modules
+            var createdModules = new List<(CourseModule Module, int TempId, int? ParentTempId)>();
             for (int i = 0; i < dto.Modules.Count; i++)
             {
                 var moduleDto = dto.Modules[i];
+                var tempId = moduleDto.TempId ?? (i + 1);
                 var module = new CourseModule
                 {
                     CourseId = course.Id,
@@ -279,11 +281,30 @@ namespace Learnit.Server.Controllers
                     Description = moduleDto.Description,
                     EstimatedHours = moduleDto.EstimatedHours,
                     Order = i,
-                    ParentModuleId = moduleDto.ParentModuleId,
+                    ParentModuleId = null, // set in second pass after ids exist
                     Notes = moduleDto.Notes,
                     IsCompleted = moduleDto.IsCompleted
                 };
+                createdModules.Add((module, tempId, moduleDto.ParentModuleId));
                 _db.CourseModules.Add(module);
+            }
+
+            await _db.SaveChangesAsync();
+
+            // Second pass: remap parent ids from temp ids to database ids
+            if (createdModules.Count > 0)
+            {
+                var tempToDb = createdModules.ToDictionary(m => m.TempId, m => m.Module.Id);
+
+                foreach (var item in createdModules)
+                {
+                    if (item.ParentTempId.HasValue && tempToDb.TryGetValue(item.ParentTempId.Value, out int parentDbId))
+                    {
+                        item.Module.ParentModuleId = parentDbId;
+                    }
+                }
+
+                await _db.SaveChangesAsync();
             }
 
             // Add external links
@@ -408,6 +429,16 @@ namespace Learnit.Server.Controllers
             if (course == null)
                 return NotFound();
 
+            var moduleIds = course.Modules.Select(m => m.Id).ToList();
+
+            if (moduleIds.Count > 0)
+            {
+                var scheduled = await _db.ScheduleEvents
+                    .Where(e => e.UserId == userId && e.CourseModuleId.HasValue && moduleIds.Contains(e.CourseModuleId.Value))
+                    .ToListAsync();
+                _db.ScheduleEvents.RemoveRange(scheduled);
+            }
+
             _db.CourseModules.RemoveRange(course.Modules);
             _db.Courses.Remove(course);
             await _db.SaveChangesAsync();
@@ -473,9 +504,11 @@ namespace Learnit.Server.Controllers
 
             // Update modules
             _db.CourseModules.RemoveRange(course.Modules);
+            var updatedModules = new List<(CourseModule Module, int TempId, int? ParentTempId)>();
             for (int i = 0; i < dto.Modules.Count; i++)
             {
                 var moduleDto = dto.Modules[i];
+                var tempId = moduleDto.TempId ?? (i + 1);
                 var module = new CourseModule
                 {
                     CourseId = course.Id,
@@ -483,11 +516,29 @@ namespace Learnit.Server.Controllers
                     Description = moduleDto.Description,
                     EstimatedHours = moduleDto.EstimatedHours,
                     Order = i,
-                    ParentModuleId = moduleDto.ParentModuleId,
+                    ParentModuleId = null,
                     Notes = moduleDto.Notes,
                     IsCompleted = moduleDto.IsCompleted
                 };
+                updatedModules.Add((module, tempId, moduleDto.ParentModuleId));
                 _db.CourseModules.Add(module);
+            }
+
+            await _db.SaveChangesAsync();
+
+            if (updatedModules.Count > 0)
+            {
+                var tempToDb = updatedModules.ToDictionary(m => m.TempId, m => m.Module.Id);
+
+                foreach (var item in updatedModules)
+                {
+                    if (item.ParentTempId.HasValue && tempToDb.TryGetValue(item.ParentTempId.Value, out int parentDbId))
+                    {
+                        item.Module.ParentModuleId = parentDbId;
+                    }
+                }
+
+                await _db.SaveChangesAsync();
             }
 
             // Update external links
