@@ -31,6 +31,8 @@ namespace Learnit.Server
 
             builder.Services.AddControllers();
             builder.Services.AddScoped<JwtService>();
+            builder.Services.AddScoped<AiContextBuilder>();
+            builder.Services.AddHttpClient<IAiProvider, OpenAiProvider>();
 
             // JWT authentication
             builder.Services.AddAuthentication("Bearer")
