@@ -48,6 +48,7 @@ namespace Learnit.Server.Controllers
             sortOrder = string.IsNullOrWhiteSpace(sortOrder) ? "desc" : sortOrder;
             var query = _db.Courses
                 .Include(c => c.Modules)
+                    .ThenInclude(m => m.SubModules)
                 .Where(c => c.UserId == userId)
                 .AsQueryable();
 
@@ -130,9 +131,20 @@ namespace Learnit.Server.Controllers
                     Description = m.Description,
                     EstimatedHours = m.EstimatedHours,
                     Order = m.Order,
-                    ParentModuleId = m.ParentModuleId,
                     Notes = m.Notes,
-                    IsCompleted = m.IsCompleted
+                    IsCompleted = m.IsCompleted,
+                    SubModules = m.SubModules
+                        .OrderBy(sm => sm.Order)
+                        .Select(sm => new CourseSubModuleDto
+                        {
+                            Id = sm.Id,
+                            Title = sm.Title,
+                            Description = sm.Description,
+                            EstimatedHours = sm.EstimatedHours,
+                            Order = sm.Order,
+                            Notes = sm.Notes,
+                            IsCompleted = sm.IsCompleted
+                        }).ToList()
                 }).ToList(),
                 ExternalLinks = c.ExternalLinks.Select(l => new ExternalLinkDto
                 {
@@ -167,6 +179,7 @@ namespace Learnit.Server.Controllers
             var userId = GetUserId();
             var course = await _db.Courses
                 .Include(c => c.Modules)
+                    .ThenInclude(m => m.SubModules)
                 .Include(c => c.ExternalLinks)
                 .Include(c => c.StudySessions)
                 .FirstOrDefaultAsync(c => c.Id == id && c.UserId == userId);
@@ -198,9 +211,20 @@ namespace Learnit.Server.Controllers
                     Description = m.Description,
                     EstimatedHours = m.EstimatedHours,
                     Order = m.Order,
-                    ParentModuleId = m.ParentModuleId,
                     Notes = m.Notes,
-                    IsCompleted = m.IsCompleted
+                    IsCompleted = m.IsCompleted,
+                    SubModules = m.SubModules
+                        .OrderBy(sm => sm.Order)
+                        .Select(sm => new CourseSubModuleDto
+                        {
+                            Id = sm.Id,
+                            Title = sm.Title,
+                            Description = sm.Description,
+                            EstimatedHours = sm.EstimatedHours,
+                            Order = sm.Order,
+                            Notes = sm.Notes,
+                            IsCompleted = sm.IsCompleted
+                        }).ToList()
                 }).ToList(),
                 ExternalLinks = course.ExternalLinks.Select(l => new ExternalLinkDto
                 {
@@ -268,44 +292,48 @@ namespace Learnit.Server.Controllers
             _db.Courses.Add(course);
             await _db.SaveChangesAsync();
 
-            // Add modules
-            var createdModules = new List<(CourseModule Module, int TempId, int? ParentTempId)>();
+            // Add modules and submodules (fixed one-level depth via separate table)
+            var createdModules = new List<(CourseModule Module, CreateCourseModuleDto Dto)>();
             for (int i = 0; i < dto.Modules.Count; i++)
             {
-                var moduleDto = dto.Modules[i];
-                var tempId = moduleDto.TempId ?? (i + 1);
+                var m = dto.Modules[i];
                 var module = new CourseModule
                 {
                     CourseId = course.Id,
-                    Title = moduleDto.Title,
-                    Description = moduleDto.Description,
-                    EstimatedHours = moduleDto.EstimatedHours,
+                    Title = m.Title,
+                    Description = m.Description,
+                    EstimatedHours = m.EstimatedHours,
                     Order = i,
-                    ParentModuleId = null, // set in second pass after ids exist
-                    Notes = moduleDto.Notes,
-                    IsCompleted = moduleDto.IsCompleted
+                    Notes = m.Notes,
+                    IsCompleted = m.IsCompleted
                 };
-                createdModules.Add((module, tempId, moduleDto.ParentModuleId));
+                createdModules.Add((module, m));
                 _db.CourseModules.Add(module);
             }
 
             await _db.SaveChangesAsync();
 
-            // Second pass: remap parent ids from temp ids to database ids
-            if (createdModules.Count > 0)
+            foreach (var pair in createdModules)
             {
-                var tempToDb = createdModules.ToDictionary(m => m.TempId, m => m.Module.Id);
-
-                foreach (var item in createdModules)
+                var module = pair.Module;
+                var subs = pair.Dto.SubModules ?? new List<CreateCourseSubModuleDto>();
+                for (int i = 0; i < subs.Count; i++)
                 {
-                    if (item.ParentTempId.HasValue && tempToDb.TryGetValue(item.ParentTempId.Value, out int parentDbId))
+                    var sm = subs[i];
+                    _db.CourseSubModules.Add(new CourseSubModule
                     {
-                        item.Module.ParentModuleId = parentDbId;
-                    }
+                        CourseModuleId = module.Id,
+                        Title = sm.Title,
+                        Description = sm.Description,
+                        EstimatedHours = sm.EstimatedHours,
+                        Order = i,
+                        Notes = sm.Notes,
+                        IsCompleted = sm.IsCompleted
+                    });
                 }
-
-                await _db.SaveChangesAsync();
             }
+
+            await _db.SaveChangesAsync();
 
             // Add external links
             foreach (var linkDto in dto.ExternalLinks)
@@ -326,6 +354,7 @@ namespace Learnit.Server.Controllers
             // Reload with modules and external links
             course = await _db.Courses
                 .Include(c => c.Modules)
+                    .ThenInclude(m => m.SubModules)
                 .Include(c => c.ExternalLinks)
                 .FirstOrDefaultAsync(c => c.Id == course.Id);
 
@@ -352,9 +381,20 @@ namespace Learnit.Server.Controllers
                     Title = m.Title,
                     EstimatedHours = m.EstimatedHours,
                     Order = m.Order,
-                    ParentModuleId = m.ParentModuleId,
                     Notes = m.Notes,
-                    IsCompleted = m.IsCompleted
+                    IsCompleted = m.IsCompleted,
+                    SubModules = m.SubModules
+                        .OrderBy(sm => sm.Order)
+                        .Select(sm => new CourseSubModuleDto
+                        {
+                            Id = sm.Id,
+                            Title = sm.Title,
+                            Description = sm.Description,
+                            EstimatedHours = sm.EstimatedHours,
+                            Order = sm.Order,
+                            Notes = sm.Notes,
+                            IsCompleted = sm.IsCompleted
+                        }).ToList()
                 }).ToList(),
                 ExternalLinks = course.ExternalLinks.Select(l => new ExternalLinkDto
                 {
@@ -433,6 +473,14 @@ namespace Learnit.Server.Controllers
 
             if (moduleIds.Count > 0)
             {
+                var subModules = await _db.CourseSubModules
+                    .Where(sm => moduleIds.Contains(sm.CourseModuleId))
+                    .ToListAsync();
+                _db.CourseSubModules.RemoveRange(subModules);
+            }
+
+            if (moduleIds.Count > 0)
+            {
                 var scheduled = await _db.ScheduleEvents
                     .Where(e => e.UserId == userId && e.CourseModuleId.HasValue && moduleIds.Contains(e.CourseModuleId.Value))
                     .ToListAsync();
@@ -451,25 +499,42 @@ namespace Learnit.Server.Controllers
         public async Task<IActionResult> ToggleModuleCompletion(int moduleId)
         {
             var userId = GetUserId();
+
             var module = await _db.CourseModules
                 .Include(m => m.Course)
                 .FirstOrDefaultAsync(m => m.Id == moduleId && m.Course.UserId == userId);
 
             if (module == null)
-                return NotFound();
+            {
+                var sub = await _db.CourseSubModules
+                    .Include(sm => sm.CourseModule)!
+                        .ThenInclude(cm => cm.Course)
+                    .FirstOrDefaultAsync(sm => sm.Id == moduleId && sm.CourseModule!.Course!.UserId == userId);
+
+                if (sub == null)
+                    return NotFound();
+
+                sub.IsCompleted = !sub.IsCompleted;
+                var course = sub.CourseModule!.Course!;
+                var completedHours = await _db.StudySessions
+                    .Where(s => s.CourseId == course.Id && s.IsCompleted)
+                    .SumAsync(s => s.DurationHours);
+                course.HoursRemaining = Math.Max(0, course.TotalEstimatedHours - (int)completedHours);
+                await _db.SaveChangesAsync();
+                return Ok(new { sub.IsCompleted, course.HoursRemaining });
+            }
 
             module.IsCompleted = !module.IsCompleted;
 
-            // Update course progress
-            var course = module.Course;
-            var completedHours = await _db.StudySessions
-                .Where(s => s.CourseId == course.Id && s.IsCompleted)
+            var parentCourse = module.Course!;
+            var moduleCompletedHours = await _db.StudySessions
+                .Where(s => s.CourseId == parentCourse.Id && s.IsCompleted)
                 .SumAsync(s => s.DurationHours);
-            course.HoursRemaining = Math.Max(0, course.TotalEstimatedHours - (int)completedHours);
+            parentCourse.HoursRemaining = Math.Max(0, parentCourse.TotalEstimatedHours - (int)moduleCompletedHours);
 
             await _db.SaveChangesAsync();
 
-            return Ok(new { module.IsCompleted, course.HoursRemaining });
+            return Ok(new { module.IsCompleted, parentCourse.HoursRemaining });
         }
 
         [HttpPut("{id}/edit")]
@@ -478,6 +543,7 @@ namespace Learnit.Server.Controllers
             var userId = GetUserId();
             var course = await _db.Courses
                 .Include(c => c.Modules)
+                    .ThenInclude(m => m.SubModules)
                 .Include(c => c.ExternalLinks)
                 .FirstOrDefaultAsync(c => c.Id == id && c.UserId == userId);
 
@@ -502,44 +568,51 @@ namespace Learnit.Server.Controllers
                 .SumAsync(s => s.DurationHours);
             course.HoursRemaining = Math.Max(0, course.TotalEstimatedHours - (int)completedHours);
 
-            // Update modules
+            // Replace modules and submodules
+            _db.CourseSubModules.RemoveRange(course.Modules.SelectMany(m => m.SubModules));
             _db.CourseModules.RemoveRange(course.Modules);
-            var updatedModules = new List<(CourseModule Module, int TempId, int? ParentTempId)>();
+
+            var newModules = new List<(CourseModule Module, CreateCourseModuleDto Dto)>();
             for (int i = 0; i < dto.Modules.Count; i++)
             {
-                var moduleDto = dto.Modules[i];
-                var tempId = moduleDto.TempId ?? (i + 1);
+                var m = dto.Modules[i];
                 var module = new CourseModule
                 {
                     CourseId = course.Id,
-                    Title = moduleDto.Title,
-                    Description = moduleDto.Description,
-                    EstimatedHours = moduleDto.EstimatedHours,
+                    Title = m.Title,
+                    Description = m.Description,
+                    EstimatedHours = m.EstimatedHours,
                     Order = i,
-                    ParentModuleId = null,
-                    Notes = moduleDto.Notes,
-                    IsCompleted = moduleDto.IsCompleted
+                    Notes = m.Notes,
+                    IsCompleted = m.IsCompleted
                 };
-                updatedModules.Add((module, tempId, moduleDto.ParentModuleId));
+                newModules.Add((module, m));
                 _db.CourseModules.Add(module);
             }
 
             await _db.SaveChangesAsync();
 
-            if (updatedModules.Count > 0)
+            foreach (var pair in newModules)
             {
-                var tempToDb = updatedModules.ToDictionary(m => m.TempId, m => m.Module.Id);
-
-                foreach (var item in updatedModules)
+                var module = pair.Module;
+                var subs = pair.Dto.SubModules ?? new List<CreateCourseSubModuleDto>();
+                for (int i = 0; i < subs.Count; i++)
                 {
-                    if (item.ParentTempId.HasValue && tempToDb.TryGetValue(item.ParentTempId.Value, out int parentDbId))
+                    var sm = subs[i];
+                    _db.CourseSubModules.Add(new CourseSubModule
                     {
-                        item.Module.ParentModuleId = parentDbId;
-                    }
+                        CourseModuleId = module.Id,
+                        Title = sm.Title,
+                        Description = sm.Description,
+                        EstimatedHours = sm.EstimatedHours,
+                        Order = i,
+                        Notes = sm.Notes,
+                        IsCompleted = sm.IsCompleted
+                    });
                 }
-
-                await _db.SaveChangesAsync();
             }
+
+            await _db.SaveChangesAsync();
 
             // Update external links
             _db.ExternalLinks.RemoveRange(course.ExternalLinks);
@@ -746,9 +819,36 @@ namespace Learnit.Server.Controllers
 
             if (dto.ParentModuleId.HasValue)
             {
-                var parentExists = course.Modules.Any(m => m.Id == dto.ParentModuleId.Value);
-                if (!parentExists)
+                var parent = course.Modules.FirstOrDefault(m => m.Id == dto.ParentModuleId.Value);
+                if (parent == null)
                     return BadRequest(new { message = "Parent module not found" });
+
+                var nextSubOrder = parent.SubModules.Any() ? parent.SubModules.Max(s => s.Order) + 1 : 0;
+                var sub = new CourseSubModule
+                {
+                    CourseModuleId = parent.Id,
+                    Title = dto.Title,
+                    Description = dto.Description ?? "",
+                    EstimatedHours = dto.EstimatedHours ?? 0,
+                    Order = nextSubOrder,
+                    Notes = dto.Notes ?? "",
+                    IsCompleted = false
+                };
+
+                _db.CourseSubModules.Add(sub);
+                course.UpdatedAt = DateTime.UtcNow;
+                await _db.SaveChangesAsync();
+
+                return Ok(new CourseSubModuleDto
+                {
+                    Id = sub.Id,
+                    Title = sub.Title,
+                    Description = sub.Description,
+                    EstimatedHours = sub.EstimatedHours,
+                    Order = sub.Order,
+                    Notes = sub.Notes,
+                    IsCompleted = sub.IsCompleted
+                });
             }
 
             var nextOrder = course.Modules.Any() ? course.Modules.Max(m => m.Order) + 1 : 0;
@@ -760,7 +860,6 @@ namespace Learnit.Server.Controllers
                 Description = dto.Description ?? "",
                 EstimatedHours = dto.EstimatedHours ?? 0,
                 Order = nextOrder,
-                ParentModuleId = dto.ParentModuleId,
                 Notes = dto.Notes ?? "",
                 IsCompleted = false
             };
@@ -776,9 +875,9 @@ namespace Learnit.Server.Controllers
                 Description = module.Description,
                 EstimatedHours = module.EstimatedHours,
                 Order = module.Order,
-                ParentModuleId = module.ParentModuleId,
                 Notes = module.Notes,
-                IsCompleted = module.IsCompleted
+                IsCompleted = module.IsCompleted,
+                SubModules = new List<CourseSubModuleDto>()
             });
         }
 
@@ -788,35 +887,74 @@ namespace Learnit.Server.Controllers
             var userId = GetUserId();
             var module = await _db.CourseModules
                 .Include(m => m.Course)
+                .Include(m => m.SubModules)
                 .FirstOrDefaultAsync(m => m.Id == moduleId && m.Course!.UserId == userId);
 
-            if (module == null)
+            if (module != null)
+            {
+                if (!string.IsNullOrEmpty(dto.Title))
+                    module.Title = dto.Title;
+                if (!string.IsNullOrEmpty(dto.Description))
+                    module.Description = dto.Description;
+                if (dto.EstimatedHours.HasValue)
+                    module.EstimatedHours = dto.EstimatedHours.Value;
+                if (!string.IsNullOrEmpty(dto.Notes))
+                    module.Notes = dto.Notes;
+
+                module.Course!.UpdatedAt = DateTime.UtcNow;
+                await _db.SaveChangesAsync();
+
+                return Ok(new CourseModuleDto
+                {
+                    Id = module.Id,
+                    Title = module.Title,
+                    Description = module.Description,
+                    EstimatedHours = module.EstimatedHours,
+                    Order = module.Order,
+                    Notes = module.Notes,
+                    IsCompleted = module.IsCompleted,
+                    SubModules = module.SubModules.OrderBy(sm => sm.Order).Select(sm => new CourseSubModuleDto
+                    {
+                        Id = sm.Id,
+                        Title = sm.Title,
+                        Description = sm.Description,
+                        EstimatedHours = sm.EstimatedHours,
+                        Order = sm.Order,
+                        Notes = sm.Notes,
+                        IsCompleted = sm.IsCompleted
+                    }).ToList()
+                });
+            }
+
+            var sub = await _db.CourseSubModules
+                .Include(sm => sm.CourseModule)!
+                    .ThenInclude(cm => cm.Course)
+                .FirstOrDefaultAsync(sm => sm.Id == moduleId && sm.CourseModule!.Course!.UserId == userId);
+
+            if (sub == null)
                 return NotFound();
 
             if (!string.IsNullOrEmpty(dto.Title))
-                module.Title = dto.Title;
+                sub.Title = dto.Title;
             if (!string.IsNullOrEmpty(dto.Description))
-                module.Description = dto.Description;
+                sub.Description = dto.Description;
             if (dto.EstimatedHours.HasValue)
-                module.EstimatedHours = dto.EstimatedHours.Value;
+                sub.EstimatedHours = dto.EstimatedHours.Value;
             if (!string.IsNullOrEmpty(dto.Notes))
-                module.Notes = dto.Notes;
-            if (dto.ParentModuleId.HasValue)
-                module.ParentModuleId = dto.ParentModuleId.Value;
+                sub.Notes = dto.Notes;
 
-            module.Course!.UpdatedAt = DateTime.UtcNow;
+            sub.CourseModule!.Course!.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync();
 
-            return Ok(new CourseModuleDto
+            return Ok(new CourseSubModuleDto
             {
-                Id = module.Id,
-                Title = module.Title,
-                Description = module.Description,
-                EstimatedHours = module.EstimatedHours,
-                Order = module.Order,
-                ParentModuleId = module.ParentModuleId,
-                Notes = module.Notes,
-                IsCompleted = module.IsCompleted
+                Id = sub.Id,
+                Title = sub.Title,
+                Description = sub.Description,
+                EstimatedHours = sub.EstimatedHours,
+                Order = sub.Order,
+                Notes = sub.Notes,
+                IsCompleted = sub.IsCompleted
             });
         }
 
