@@ -3,6 +3,7 @@ using Learnit.Server.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Linq;
 using System.Security.Claims;
 
 namespace Learnit.Server.Controllers
@@ -221,8 +222,33 @@ namespace Learnit.Server.Controllers
         public async Task<IActionResult> AutoScheduleModules([FromBody] AutoScheduleRequest request)
         {
             var userId = GetUserId();
+            var user = await _db.Users.FindAsync(userId);
 
-            // Get available modules
+            if (user == null)
+            {
+                return Unauthorized();
+            }
+
+            var includeWeekends = request.IncludeWeekends ?? false;
+            var preferredStartHour = Math.Clamp(request.PreferredStartHour ?? 8, 5, 12);
+            var preferredEndHour = Math.Clamp(request.PreferredEndHour ?? 18, preferredStartHour + 2, 22);
+            var focusPreference = request.FocusPreference?.ToLowerInvariant() ?? "morning";
+
+            var maxSessionMinutes = Math.Clamp(request.MaxSessionMinutes ?? user.MaxSessionMinutes, 30, 180);
+            var maxBlockHours = maxSessionMinutes / 60d;
+            var bufferMinutes = Math.Clamp(request.BufferMinutes ?? 15, 5, 45);
+
+            var weeklyLimitHours = request.WeeklyLimitHours ?? user.WeeklyStudyLimitHours;
+            var maxDailyHours = request.MaxDailyHours ?? Math.Max(3, Math.Min(8, weeklyLimitHours > 0 ? weeklyLimitHours / 3 : 6));
+
+            var speedMultiplier = user.StudySpeed.ToLowerInvariant() switch
+            {
+                "slow" => 1.25,
+                "fast" => 0.9,
+                _ => 1.0
+            };
+
+            // Get available modules ordered by urgency and priority
             var scheduledModuleIds = await _db.ScheduleEvents
                 .Where(e => e.UserId == userId && e.CourseModuleId.HasValue)
                 .Select(e => e.CourseModuleId!.Value)
@@ -230,67 +256,83 @@ namespace Learnit.Server.Controllers
 
             var modulesToSchedule = await _db.CourseModules
                 .Include(cm => cm.Course)
-                .Where(cm => cm.Course!.UserId == userId && !scheduledModuleIds.Contains(cm.Id))
-                .OrderBy(cm => cm.Course!.Priority == "High" ? 1 :
-                             cm.Course!.Priority == "Medium" ? 2 : 3)
+                .Where(cm => cm.Course!.UserId == userId && !scheduledModuleIds.Contains(cm.Id) && cm.Course!.IsActive)
+                .OrderBy(cm => cm.Course!.TargetCompletionDate ?? DateTime.MaxValue)
+                .ThenBy(cm => cm.Course!.Priority == "High" ? 1 : cm.Course!.Priority == "Medium" ? 2 : 3)
                 .ThenBy(cm => cm.Order)
                 .ToListAsync();
 
             var events = new List<ScheduleEvent>();
-            var currentTime = request.StartDateTime ?? DateTime.UtcNow;
+            var currentTime = EnsureUtc(request.StartDateTime ?? DateTime.UtcNow);
 
-            // Parameters for more realistic scheduling
-            const int workdayStartHour = 8;
             const int lunchStartHour = 12;
             const int lunchEndHour = 13;
-            const int workdayEndHour = 18; // hard stop
-            const int maxDailyHours = 5; // avoid cramming entire day
-            const double maxBlockHours = 1.5; // 90m focus blocks
-            const int bufferMinutes = 20; // short reset buffer
 
-            // Track hours booked per day to avoid full-day stacking
-            DateTime currentDay = currentTime.Date;
-            double currentDayHours = 0;
+            DateTime GetWeekStart(DateTime dt)
+            {
+                var normalized = dt.Date;
+                var offset = normalized.DayOfWeek == DayOfWeek.Sunday ? 6 : ((int)normalized.DayOfWeek - 1);
+                return normalized.AddDays(-offset);
+            }
 
             DateTime AlignToWorkWindow(DateTime dt)
             {
-                var aligned = dt;
+                var aligned = EnsureUtc(dt);
 
-                // Skip to next weekday if weekend
-                while (aligned.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+                while (!includeWeekends && (aligned.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday))
                 {
-                    aligned = aligned.AddDays(1).Date.AddHours(workdayStartHour);
+                    aligned = aligned.AddDays(1).Date.AddHours(preferredStartHour);
                 }
 
-                // Before workday -> jump to start
-                if (aligned.Hour < workdayStartHour)
+                if (aligned.Hour < preferredStartHour)
                 {
-                    aligned = aligned.Date.AddHours(workdayStartHour);
+                    aligned = aligned.Date.AddHours(preferredStartHour);
                 }
-                // Inside lunch gap -> jump to end of lunch
-                else if (aligned.Hour == lunchStartHour || (aligned.Hour == lunchStartHour - 1 && aligned.Minute > 0))
+                else if (aligned.Hour >= preferredEndHour)
                 {
-                    aligned = aligned.Date.AddHours(lunchEndHour);
+                    aligned = aligned.AddDays(1).Date.AddHours(preferredStartHour);
                 }
-                // After workday -> move to next day start
-                else if (aligned.Hour >= workdayEndHour)
+
+                // Soft preference nudge
+                if (focusPreference == "morning" && aligned.Hour > preferredStartHour + 2)
                 {
-                    aligned = aligned.AddDays(1).Date.AddHours(workdayStartHour);
+                    aligned = aligned.Date.AddHours(preferredStartHour);
+                }
+                else if (focusPreference == "evening" && aligned.Hour < Math.Max(preferredStartHour, preferredEndHour - 3))
+                {
+                    aligned = aligned.Date.AddHours(Math.Max(preferredStartHour, preferredEndHour - 3));
+                }
+
+                // Avoid lunch window when it sits inside the work window
+                if (preferredStartHour < lunchStartHour && preferredEndHour > lunchEndHour)
+                {
+                    if (aligned.Hour == lunchStartHour || (aligned.Hour == lunchStartHour - 1 && aligned.Minute > 0))
+                    {
+                        aligned = aligned.Date.AddHours(lunchEndHour);
+                    }
+                    else if (aligned.Hour >= lunchStartHour && aligned.Hour < lunchEndHour)
+                    {
+                        aligned = aligned.Date.AddHours(lunchEndHour);
+                    }
                 }
 
                 return aligned;
             }
 
             currentTime = AlignToWorkWindow(currentTime);
-            currentDay = currentTime.Date;
+            var currentDay = currentTime.Date;
+            double currentDayHours = 0;
+            var weeklyHours = new Dictionary<DateTime, double>();
 
             foreach (var module in modulesToSchedule)
             {
-                double remainingHours = Math.Max(1, module.EstimatedHours);
+                double remainingHours = Math.Max(1, module.EstimatedHours * speedMultiplier);
+
+                // Slightly smaller blocks for advanced material
+                var difficultyCap = module.Course?.Difficulty == "Advanced" ? Math.Min(maxBlockHours, 1.0) : maxBlockHours;
 
                 while (remainingHours > 0)
                 {
-                    // Reset daily counters if we moved to a new day
                     if (currentTime.Date != currentDay)
                     {
                         currentDay = currentTime.Date;
@@ -298,31 +340,60 @@ namespace Learnit.Server.Controllers
                         currentTime = AlignToWorkWindow(currentTime);
                     }
 
-                    // If we've hit the daily cap, move to next day start
+                    var weekKey = GetWeekStart(currentTime);
+                    weeklyHours.TryGetValue(weekKey, out var usedThisWeek);
+
+                    if (weeklyLimitHours > 0 && usedThisWeek >= weeklyLimitHours)
+                    {
+                        currentTime = AlignToWorkWindow(weekKey.AddDays(7).AddHours(preferredStartHour));
+                        continue;
+                    }
+
                     if (currentDayHours >= maxDailyHours)
                     {
                         currentTime = AlignToWorkWindow(currentTime.AddDays(1));
                         continue;
                     }
 
-                    // Ensure we are inside work hours
                     currentTime = AlignToWorkWindow(currentTime);
 
-                    // Available time today before hard stop and daily cap
-                    // Avoid scheduling across lunch
-                    var dayStopHour = currentTime.Hour < lunchStartHour ? lunchStartHour : workdayEndHour;
-                    var hoursUntilDayEnd = (dayStopHour - currentTime.Hour) - (currentTime.Minute > 0 ? 1 : 0);
-                    var availableToday = Math.Min(hoursUntilDayEnd, maxDailyHours - currentDayHours);
+                    DateTime dayBoundary;
+                    if (preferredStartHour < lunchStartHour && preferredEndHour > lunchEndHour && currentTime.Hour < lunchStartHour)
+                    {
+                        dayBoundary = currentTime.Date.AddHours(lunchStartHour);
+                    }
+                    else
+                    {
+                        dayBoundary = currentTime.Date.AddHours(preferredEndHour);
+                    }
 
-                    if (availableToday <= 0)
+                    var availableHoursToday = Math.Max(0, (dayBoundary - currentTime).TotalHours);
+                    var remainingDailyHours = maxDailyHours - currentDayHours;
+                    var remainingWeeklyHours = weeklyLimitHours > 0 ? weeklyLimitHours - usedThisWeek : double.MaxValue;
+
+                    var blockHours = new[]
+                    {
+                        difficultyCap,
+                        remainingHours,
+                        availableHoursToday,
+                        remainingDailyHours,
+                        remainingWeeklyHours
+                    }.Min();
+
+                    if (blockHours <= 0)
                     {
                         currentTime = AlignToWorkWindow(currentTime.AddDays(1));
                         continue;
                     }
 
-                    var blockHours = Math.Min(Math.Min(maxBlockHours, availableToday), remainingHours);
-
                     var endTime = currentTime.AddHours(blockHours);
+
+                    // Do not cross the lunch gap
+                    if (preferredStartHour < lunchStartHour && preferredEndHour > lunchEndHour && currentTime < currentTime.Date.AddHours(lunchStartHour) && endTime > currentTime.Date.AddHours(lunchStartHour))
+                    {
+                        endTime = currentTime.Date.AddHours(lunchStartHour);
+                        blockHours = (endTime - currentTime).TotalHours;
+                    }
 
                     var scheduleEvent = new ScheduleEvent
                     {
@@ -340,9 +411,9 @@ namespace Learnit.Server.Controllers
 
                     remainingHours -= blockHours;
                     currentDayHours += blockHours;
+                    weeklyHours[weekKey] = usedThisWeek + blockHours;
 
-                    // Add buffer before next block
-                    currentTime = endTime.AddMinutes(bufferMinutes);
+                    currentTime = AlignToWorkWindow(endTime.AddMinutes(bufferMinutes));
                 }
             }
 
@@ -355,6 +426,9 @@ namespace Learnit.Server.Controllers
             return Ok(new
             {
                 scheduledEvents = events.Count,
+                weeklyLimitHours,
+                maxDailyHours,
+                maxSessionMinutes,
                 events = events.Select(e => new ScheduleEventDto
                 {
                     Id = e.Id,
@@ -420,6 +494,14 @@ namespace Learnit.Server.Controllers
     public class AutoScheduleRequest
     {
         public DateTime? StartDateTime { get; set; }
+        public int? PreferredStartHour { get; set; }
+        public int? PreferredEndHour { get; set; }
+        public bool? IncludeWeekends { get; set; }
+        public int? MaxDailyHours { get; set; }
+        public int? MaxSessionMinutes { get; set; }
+        public int? BufferMinutes { get; set; }
+        public int? WeeklyLimitHours { get; set; }
+        public string? FocusPreference { get; set; }
     }
     
 }
