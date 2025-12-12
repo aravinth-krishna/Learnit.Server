@@ -57,6 +57,8 @@ namespace Learnit.Server.Controllers
 
             var query = _db.ScheduleEvents
                 .Where(e => e.UserId == userId)
+                .Include(e => e.CourseModule)
+                    .ThenInclude(cm => cm!.Course)
                 .AsQueryable();
 
             if (from.HasValue)
@@ -82,7 +84,16 @@ namespace Learnit.Server.Controllers
                 StartUtc = e.StartUtc,
                 EndUtc = e.EndUtc,
                 AllDay = e.AllDay,
-                CourseModuleId = e.CourseModuleId
+                CourseModuleId = e.CourseModuleId,
+                CourseModule = e.CourseModule == null
+                    ? null
+                    : new CourseModuleInfo
+                    {
+                        Id = e.CourseModule.Id,
+                        Title = e.CourseModule.Title,
+                        CourseId = e.CourseModule.CourseId,
+                        CourseTitle = e.CourseModule.Course?.Title ?? string.Empty
+                    }
             }).ToList();
 
             return Ok(result);
@@ -161,6 +172,24 @@ namespace Learnit.Server.Controllers
             return Ok(new { message = "Event deleted" });
         }
 
+        [HttpDelete("reset")]
+        public async Task<IActionResult> ResetAll()
+        {
+            var userId = GetUserId();
+
+            var events = await _db.ScheduleEvents
+                .Where(e => e.UserId == userId)
+                .ToListAsync();
+
+            if (events.Count == 0)
+                return Ok(new { message = "No events to remove", removed = 0 });
+
+            _db.ScheduleEvents.RemoveRange(events);
+            await _db.SaveChangesAsync();
+
+            return Ok(new { message = "All schedule events cleared", removed = events.Count });
+        }
+
         [HttpGet("available-modules")]
         public async Task<IActionResult> GetAvailableModules()
         {
@@ -210,32 +239,40 @@ namespace Learnit.Server.Controllers
             var events = new List<ScheduleEvent>();
             var currentTime = request.StartDateTime ?? DateTime.UtcNow;
 
-            // Parameters for realistic scheduling
-            const int workdayStartHour = 9;
+            // Parameters for more realistic scheduling
+            const int workdayStartHour = 8;
+            const int lunchStartHour = 12;
+            const int lunchEndHour = 13;
             const int workdayEndHour = 18; // hard stop
-            const int maxDailyHours = 6;
-            const int maxBlockHours = 2; // keep sessions manageable
-            const int bufferMinutes = 30; // gap between blocks
+            const int maxDailyHours = 5; // avoid cramming entire day
+            const double maxBlockHours = 1.5; // 90m focus blocks
+            const int bufferMinutes = 20; // short reset buffer
 
             // Track hours booked per day to avoid full-day stacking
             DateTime currentDay = currentTime.Date;
             double currentDayHours = 0;
 
-            DateTime AlignToWorkday(DateTime dt)
+            DateTime AlignToWorkWindow(DateTime dt)
             {
                 var aligned = dt;
 
-                // Skip to next weekday if on weekend
+                // Skip to next weekday if weekend
                 while (aligned.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
                 {
                     aligned = aligned.AddDays(1).Date.AddHours(workdayStartHour);
                 }
 
-                // Before start -> set to start; after end -> next day start
+                // Before workday -> jump to start
                 if (aligned.Hour < workdayStartHour)
                 {
                     aligned = aligned.Date.AddHours(workdayStartHour);
                 }
+                // Inside lunch gap -> jump to end of lunch
+                else if (aligned.Hour == lunchStartHour || (aligned.Hour == lunchStartHour - 1 && aligned.Minute > 0))
+                {
+                    aligned = aligned.Date.AddHours(lunchEndHour);
+                }
+                // After workday -> move to next day start
                 else if (aligned.Hour >= workdayEndHour)
                 {
                     aligned = aligned.AddDays(1).Date.AddHours(workdayStartHour);
@@ -244,7 +281,7 @@ namespace Learnit.Server.Controllers
                 return aligned;
             }
 
-            currentTime = AlignToWorkday(currentTime);
+            currentTime = AlignToWorkWindow(currentTime);
             currentDay = currentTime.Date;
 
             foreach (var module in modulesToSchedule)
@@ -258,26 +295,28 @@ namespace Learnit.Server.Controllers
                     {
                         currentDay = currentTime.Date;
                         currentDayHours = 0;
-                        currentTime = AlignToWorkday(currentTime);
+                        currentTime = AlignToWorkWindow(currentTime);
                     }
 
                     // If we've hit the daily cap, move to next day start
                     if (currentDayHours >= maxDailyHours)
                     {
-                        currentTime = AlignToWorkday(currentTime.AddDays(1));
+                        currentTime = AlignToWorkWindow(currentTime.AddDays(1));
                         continue;
                     }
 
                     // Ensure we are inside work hours
-                    currentTime = AlignToWorkday(currentTime);
+                    currentTime = AlignToWorkWindow(currentTime);
 
                     // Available time today before hard stop and daily cap
-                    var hoursUntilDayEnd = (workdayEndHour - currentTime.Hour) - (currentTime.Minute > 0 ? 1 : 0);
+                    // Avoid scheduling across lunch
+                    var dayStopHour = currentTime.Hour < lunchStartHour ? lunchStartHour : workdayEndHour;
+                    var hoursUntilDayEnd = (dayStopHour - currentTime.Hour) - (currentTime.Minute > 0 ? 1 : 0);
                     var availableToday = Math.Min(hoursUntilDayEnd, maxDailyHours - currentDayHours);
 
                     if (availableToday <= 0)
                     {
-                        currentTime = AlignToWorkday(currentTime.AddDays(1));
+                        currentTime = AlignToWorkWindow(currentTime.AddDays(1));
                         continue;
                     }
 
