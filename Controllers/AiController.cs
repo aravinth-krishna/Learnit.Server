@@ -60,11 +60,12 @@ namespace Learnit.Server.Controllers
         [HttpPost("create-course")]
         public async Task<ActionResult<AiCourseGenerateResponse>> CreateCourse([FromBody] AiCourseGenerateRequest request, CancellationToken cancellationToken)
         {
-            var systemPrompt = "You draft detailed, user-specific course plans. Respond with JSON ONLY (no prose). Schema: {title, description, subjectArea, learningObjectives (array of 3-6 short goals), difficulty, priority, totalEstimatedHours (int), targetCompletionDate (yyyy-MM-dd), notes, modules:[{title, description, estimatedHours (int), subModules:[{title, description, estimatedHours}]}]}. Honor the user's prompt and customize subjects, goals, and module names/hours to their needs.";
+            var systemPrompt = "You are Learnit AI. Return ONLY compact JSON (no markdown, no prose) matching this schema: {title, description, subjectArea, learningObjectives: [3-6 short strings], difficulty, priority, totalEstimatedHours: int, targetCompletionDate: 'yyyy-MM-dd', notes, modules: [{title, description, estimatedHours: int, subModules: [{title, description, estimatedHours: int}]}]}. Rules: (1) personalize titles/modules to the prompt, (2) hours must be positive integers, (3) include at least 3 modules with at least 1 submodule each, (4) keep learningObjectives focused outcomes, (5) never wrap in code fences or text. If unsure, output the closest valid JSON.";
             var reply = await _provider.GenerateAsync(systemPrompt, request.Prompt, null, cancellationToken);
 
             var parsed = TryParseCourseJson(reply) ?? BuildHeuristicCourse(request.Prompt);
-            return Ok(parsed);
+            var normalized = NormalizeCourse(parsed);
+            return Ok(normalized);
         }
 
         private static string ExtractJsonBlock(string reply)
@@ -98,17 +99,13 @@ namespace Learnit.Server.Controllers
                 var root = doc.RootElement;
                 var resp = new AiCourseGenerateResponse
                 {
-                    Title = root.TryGetProperty("title", out var titleEl) ? titleEl.GetString() ?? "Generated Course" : "Generated Course",
+                    Title = root.TryGetProperty("title", out var titleEl) ? titleEl.GetString() ?? string.Empty : string.Empty,
                     Description = root.TryGetProperty("description", out var descEl) ? descEl.GetString() ?? string.Empty : string.Empty,
                     SubjectArea = root.TryGetProperty("subjectArea", out var subj) ? subj.GetString() ?? string.Empty : string.Empty,
-                    LearningObjectives = root.TryGetProperty("learningObjectives", out var goals)
-                        ? goals.ValueKind == JsonValueKind.Array
-                            ? string.Join("; ", goals.EnumerateArray().Select(x => x.GetString()).Where(x => !string.IsNullOrWhiteSpace(x)))
-                            : goals.GetString() ?? string.Empty
-                        : string.Empty,
-                    Difficulty = root.TryGetProperty("difficulty", out var diff) ? diff.GetString() ?? "Balanced" : "Balanced",
-                    Priority = root.TryGetProperty("priority", out var pr) ? pr.GetString() ?? "Medium" : "Medium",
-                    TotalEstimatedHours = root.TryGetProperty("totalEstimatedHours", out var hrs) ? hrs.GetInt32() : 10,
+                    LearningObjectives = ParseLearningObjectives(root),
+                    Difficulty = root.TryGetProperty("difficulty", out var diff) ? diff.GetString() ?? string.Empty : string.Empty,
+                    Priority = root.TryGetProperty("priority", out var pr) ? pr.GetString() ?? string.Empty : string.Empty,
+                    TotalEstimatedHours = ParseHours(root, "totalEstimatedHours", 0),
                     TargetCompletionDate = root.TryGetProperty("targetCompletionDate", out var tcd) ? tcd.GetString() ?? string.Empty : string.Empty,
                     Notes = root.TryGetProperty("notes", out var nts) ? nts.GetString() ?? string.Empty : string.Empty,
                     Modules = new List<AiModuleDraft>()
@@ -122,7 +119,7 @@ namespace Learnit.Server.Controllers
                         {
                             Title = m.TryGetProperty("title", out var mt) ? mt.GetString() ?? "Module" : "Module",
                             Description = m.TryGetProperty("description", out var md) ? md.GetString() ?? string.Empty : string.Empty,
-                            EstimatedHours = m.TryGetProperty("estimatedHours", out var eh) ? eh.GetInt32() : 2,
+                            EstimatedHours = ParseHours(m, "estimatedHours", 0),
                             SubModules = new List<AiSubModuleDraft>()
                         };
 
@@ -133,7 +130,7 @@ namespace Learnit.Server.Controllers
                                 moduleDraft.SubModules.Add(new AiSubModuleDraft
                                 {
                                     Title = s.TryGetProperty("title", out var st) ? st.GetString() ?? "Submodule" : "Submodule",
-                                    EstimatedHours = s.TryGetProperty("estimatedHours", out var sh) ? sh.GetInt32() : 1,
+                                    EstimatedHours = ParseHours(s, "estimatedHours", 0),
                                     Description = s.TryGetProperty("description", out var sd) ? sd.GetString() ?? string.Empty : string.Empty
                                 });
                             }
@@ -156,34 +153,145 @@ namespace Learnit.Server.Controllers
             }
         }
 
+        private static string ParseLearningObjectives(JsonElement root)
+        {
+            if (!root.TryGetProperty("learningObjectives", out var goals)) return string.Empty;
+
+            if (goals.ValueKind == JsonValueKind.Array)
+            {
+                var items = goals
+                    .EnumerateArray()
+                    .Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() : null)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Select(x => x!.Trim())
+                    .ToArray();
+
+                return string.Join("; ", items);
+            }
+
+            return goals.GetString() ?? string.Empty;
+        }
+
+        private static int ParseHours(JsonElement element, string propertyName, int fallback)
+        {
+            if (!element.TryGetProperty(propertyName, out var prop)) return fallback;
+
+            try
+            {
+                return prop.ValueKind switch
+                {
+                    JsonValueKind.Number when prop.TryGetInt32(out var i) => i,
+                    JsonValueKind.Number when prop.TryGetDouble(out var d) => (int)Math.Round(d),
+                    JsonValueKind.String when int.TryParse(prop.GetString(), out var s) => s,
+                    _ => fallback
+                };
+            }
+            catch
+            {
+                return fallback;
+            }
+        }
+
+        private static AiCourseGenerateResponse NormalizeCourse(AiCourseGenerateResponse resp)
+        {
+            resp.Title = string.IsNullOrWhiteSpace(resp.Title) ? "Course Plan" : resp.Title.Trim();
+            resp.Description = resp.Description?.Trim() ?? string.Empty;
+            resp.SubjectArea = resp.SubjectArea?.Trim() ?? string.Empty;
+            resp.Difficulty = string.IsNullOrWhiteSpace(resp.Difficulty) ? "Balanced" : resp.Difficulty.Trim();
+            resp.Priority = string.IsNullOrWhiteSpace(resp.Priority) ? "Medium" : resp.Priority.Trim();
+            resp.Notes = resp.Notes?.Trim() ?? string.Empty;
+
+            if (resp.Modules == null)
+            {
+                resp.Modules = new List<AiModuleDraft>();
+            }
+
+            if (!resp.Modules.Any())
+            {
+                resp.Modules.Add(new AiModuleDraft
+                {
+                    Title = "Module 1",
+                    Description = "Getting started",
+                    EstimatedHours = resp.TotalEstimatedHours > 0 ? resp.TotalEstimatedHours : 4,
+                    SubModules = new List<AiSubModuleDraft>
+                    {
+                        new() { Title = "Lesson 1", EstimatedHours = 2, Description = "Overview" },
+                        new() { Title = "Lesson 2", EstimatedHours = 2, Description = "Practice" }
+                    }
+                });
+            }
+
+            foreach (var module in resp.Modules)
+            {
+                module.Title = string.IsNullOrWhiteSpace(module.Title) ? "Module" : module.Title.Trim();
+                module.Description = module.Description?.Trim() ?? string.Empty;
+                module.EstimatedHours = module.EstimatedHours <= 0 ? 1 : module.EstimatedHours;
+
+                if (module.SubModules == null)
+                {
+                    module.SubModules = new List<AiSubModuleDraft>();
+                }
+
+                if (!module.SubModules.Any())
+                {
+                    module.SubModules.Add(new AiSubModuleDraft
+                    {
+                        Title = "Submodule",
+                        EstimatedHours = Math.Max(1, module.EstimatedHours / 2),
+                        Description = ""
+                    });
+                }
+
+                foreach (var sub in module.SubModules)
+                {
+                    sub.Title = string.IsNullOrWhiteSpace(sub.Title) ? "Submodule" : sub.Title.Trim();
+                    sub.Description = sub.Description?.Trim() ?? string.Empty;
+                    sub.EstimatedHours = sub.EstimatedHours <= 0 ? 1 : sub.EstimatedHours;
+                }
+            }
+
+            if (resp.TotalEstimatedHours <= 0)
+            {
+                resp.TotalEstimatedHours = resp.Modules.Sum(m => Math.Max(1, m.EstimatedHours));
+            }
+
+            if (string.IsNullOrWhiteSpace(resp.LearningObjectives))
+            {
+                resp.LearningObjectives = string.Join("; ", resp.Modules.Take(3).Select(m => $"Complete {m.Title}"));
+            }
+
+            if (string.IsNullOrWhiteSpace(resp.TargetCompletionDate))
+            {
+                resp.TargetCompletionDate = DateTime.UtcNow.AddDays(28).ToString("yyyy-MM-dd");
+            }
+
+            return resp;
+        }
+
         private static AiCourseGenerateResponse BuildHeuristicCourse(string prompt)
         {
-            // Basic heuristic draft when LLM output is unusable or stubbed
+            // Stronger heuristic when LLM output is unusable or stubbed
             var trimmed = (prompt ?? string.Empty).Trim();
-            var subjectTokens = string.IsNullOrWhiteSpace(trimmed)
-                ? Array.Empty<string>()
-                : trimmed.Split(new[] { ' ', ',', ';', '.' }, StringSplitOptions.RemoveEmptyEntries).Take(4).ToArray();
-            var subject = subjectTokens.Length == 0 ? "Custom Course" : string.Join(" ", subjectTokens);
+            var subject = DeriveSubject(trimmed);
+            var weeks = ExtractWeeks(trimmed);
+            var now = DateTime.UtcNow;
+            var targetDate = now.AddDays(Math.Max(21, weeks * 7)).ToString("yyyy-MM-dd");
 
-            string TitleFromPrompt()
-            {
-                if (string.IsNullOrWhiteSpace(trimmed)) return "Tailored Course Plan";
-                var words = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Take(10);
-                var title = string.Join(' ', words);
-                return title.Length > 4 ? title : "Tailored Course Plan";
-            }
+            var totalHours = weeks > 0 ? Math.Max(12, weeks * 6) : 24;
+            var modules = weeks > 0
+                ? BuildWeekModules(subject, weeks, totalHours)
+                : BuildDefaultModules(subject, totalHours);
 
             var goals = new[]
             {
                 $"Understand the fundamentals of {subject}",
-                $"Apply {subject} in hands-on exercises",
-                $"Deliver a small project using {subject}"
+                $"Apply {subject} in guided exercises",
+                $"Build and ship a small {subject} project"
             };
 
-            var now = DateTime.UtcNow;
             return new AiCourseGenerateResponse
             {
-                Title = TitleFromPrompt(),
+                Title = DeriveTitle(trimmed),
                 Description = string.IsNullOrWhiteSpace(trimmed)
                     ? "Auto-generated plan based on your request."
                     : trimmed,
@@ -191,49 +299,137 @@ namespace Learnit.Server.Controllers
                 LearningObjectives = string.Join("; ", goals),
                 Difficulty = "Balanced",
                 Priority = "Medium",
-                TotalEstimatedHours = 24,
-                TargetCompletionDate = now.AddDays(28).ToString("yyyy-MM-dd"),
+                TotalEstimatedHours = totalHours,
+                TargetCompletionDate = targetDate,
                 Notes = "Heuristic plan generated because AI response was not structured JSON.",
-                Modules = new List<AiModuleDraft>
-                {
-                    new()
-                    {
-                        Title = $"Foundations: {subject}",
-                        Description = "Key concepts, terminology, and setup.",
-                        EstimatedHours = 6,
-                        SubModules = new List<AiSubModuleDraft>
-                        {
-                            new() { Title = "Basics", EstimatedHours = 2, Description = "Core principles" },
-                            new() { Title = "Setup", EstimatedHours = 2, Description = "Environment and tooling" },
-                            new() { Title = "First steps", EstimatedHours = 2, Description = "Hello world and simple task" }
-                        }
-                    },
-                    new()
-                    {
-                        Title = $"Practice: {subject}",
-                        Description = "Apply skills with guided exercises.",
-                        EstimatedHours = 8,
-                        SubModules = new List<AiSubModuleDraft>
-                        {
-                            new() { Title = "Core exercises", EstimatedHours = 3, Description = "Hands-on drills" },
-                            new() { Title = "Patterns", EstimatedHours = 3, Description = "Common approaches" },
-                            new() { Title = "Review", EstimatedHours = 2, Description = "Checkpoint and feedback" }
-                        }
-                    },
-                    new()
-                    {
-                        Title = $"Project: {subject}",
-                        Description = "Build a small project to consolidate learning.",
-                        EstimatedHours = 10,
-                        SubModules = new List<AiSubModuleDraft>
-                        {
-                            new() { Title = "Plan", EstimatedHours = 2, Description = "Define scope" },
-                            new() { Title = "Build", EstimatedHours = 6, Description = "Implement features" },
-                            new() { Title = "Polish", EstimatedHours = 2, Description = "Test and refine" }
-                        }
-                    }
-                }
+                Modules = modules
             };
+        }
+
+        private static string DeriveTitle(string prompt)
+        {
+            if (string.IsNullOrWhiteSpace(prompt)) return "Tailored Course Plan";
+            var words = prompt.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Take(12);
+            var title = string.Join(' ', words);
+            return title.Length > 4 ? title : "Tailored Course Plan";
+        }
+
+        private static string DeriveSubject(string prompt)
+        {
+            if (string.IsNullOrWhiteSpace(prompt)) return "Custom Course";
+
+            var lower = prompt.ToLowerInvariant();
+            if (lower.Contains("node.js") || lower.Contains("nodejs") || lower.Contains("node js") || lower.Contains("node"))
+                return "Node.js";
+
+            var cleaned = Regex.Replace(prompt, "\\b\\d+\\s*-?\\s*week(s)?\\b", string.Empty, RegexOptions.IgnoreCase);
+            cleaned = Regex.Replace(cleaned, "\\b(course|learn|learning|about|basics|foundation|foundations)\\b", "", RegexOptions.IgnoreCase);
+            var tokens = cleaned
+                .Split(new[] { ' ', ',', ';', '.' }, StringSplitOptions.RemoveEmptyEntries)
+                .Take(6)
+                .ToArray();
+
+            var subject = tokens.Length == 0 ? "Custom Course" : string.Join(" ", tokens);
+            return subject.Trim();
+        }
+
+        private static int ExtractWeeks(string prompt)
+        {
+            var match = Regex.Match(prompt ?? string.Empty, "(?<num>\\d+)\\s*-?\\s*week", RegexOptions.IgnoreCase);
+            if (match.Success && int.TryParse(match.Groups["num"].Value, out var weeks) && weeks > 0 && weeks <= 52)
+            {
+                return weeks;
+            }
+            return 0;
+        }
+
+        private static List<AiModuleDraft> BuildWeekModules(string subject, int weeks, int totalHours)
+        {
+            var modules = new List<AiModuleDraft>();
+            var hoursPerWeek = DistributeHours(totalHours, weeks);
+
+            for (int i = 0; i < weeks; i++)
+            {
+                var weekNumber = i + 1;
+                var hours = hoursPerWeek[i];
+                modules.Add(new AiModuleDraft
+                {
+                    Title = $"Week {weekNumber}: {subject}",
+                    Description = weekNumber == weeks
+                        ? "Capstone and consolidation"
+                        : "Concepts and practice",
+                    EstimatedHours = hours,
+                    SubModules = new List<AiSubModuleDraft>
+                    {
+                        new() { Title = "Concepts", EstimatedHours = Math.Max(1, hours / 3), Description = "Key topics" },
+                        new() { Title = "Hands-on", EstimatedHours = Math.Max(1, hours / 3), Description = "Guided exercises" },
+                        new() { Title = "Review / Project", EstimatedHours = Math.Max(1, hours - 2 * Math.Max(1, hours / 3)), Description = "Apply and reflect" }
+                    }
+                });
+            }
+
+            return modules;
+        }
+
+        private static List<AiModuleDraft> BuildDefaultModules(string subject, int totalHours)
+        {
+            var modules = new List<AiModuleDraft>();
+            var hoursPerModule = DistributeHours(totalHours, 3);
+
+            modules.Add(new AiModuleDraft
+            {
+                Title = $"Foundations: {subject}",
+                Description = "Key concepts, terminology, and setup.",
+                EstimatedHours = hoursPerModule[0],
+                SubModules = new List<AiSubModuleDraft>
+                {
+                    new() { Title = "Basics", EstimatedHours = Math.Max(1, hoursPerModule[0] / 3), Description = "Core principles" },
+                    new() { Title = "Setup", EstimatedHours = Math.Max(1, hoursPerModule[0] / 3), Description = "Environment and tooling" },
+                    new() { Title = "First steps", EstimatedHours = Math.Max(1, hoursPerModule[0] - 2 * Math.Max(1, hoursPerModule[0] / 3)), Description = "Hello world" }
+                }
+            });
+
+            modules.Add(new AiModuleDraft
+            {
+                Title = $"Practice: {subject}",
+                Description = "Apply skills with guided exercises.",
+                EstimatedHours = hoursPerModule[1],
+                SubModules = new List<AiSubModuleDraft>
+                {
+                    new() { Title = "Core exercises", EstimatedHours = Math.Max(1, hoursPerModule[1] / 3), Description = "Hands-on drills" },
+                    new() { Title = "Patterns", EstimatedHours = Math.Max(1, hoursPerModule[1] / 3), Description = "Common approaches" },
+                    new() { Title = "Review", EstimatedHours = Math.Max(1, hoursPerModule[1] - 2 * Math.Max(1, hoursPerModule[1] / 3)), Description = "Checkpoint" }
+                }
+            });
+
+            modules.Add(new AiModuleDraft
+            {
+                Title = $"Project: {subject}",
+                Description = "Build a small project to consolidate learning.",
+                EstimatedHours = hoursPerModule[2],
+                SubModules = new List<AiSubModuleDraft>
+                {
+                    new() { Title = "Plan", EstimatedHours = Math.Max(1, hoursPerModule[2] / 4), Description = "Define scope" },
+                    new() { Title = "Build", EstimatedHours = Math.Max(1, hoursPerModule[2] / 2), Description = "Implement" },
+                    new() { Title = "Polish", EstimatedHours = Math.Max(1, hoursPerModule[2] - Math.Max(1, hoursPerModule[2] / 4) - Math.Max(1, hoursPerModule[2] / 2)), Description = "Test and refine" }
+                }
+            });
+
+            return modules;
+        }
+
+        private static int[] DistributeHours(int total, int buckets)
+        {
+            var safeTotal = Math.Max(total, buckets);
+            var baseValue = safeTotal / buckets;
+            var remainder = safeTotal % buckets;
+            var arr = new int[buckets];
+            for (int i = 0; i < buckets; i++)
+            {
+                arr[i] = baseValue + (i < remainder ? 1 : 0);
+                if (arr[i] <= 0) arr[i] = 1;
+            }
+            return arr;
         }
 
         [HttpPost("schedule-insights")]
