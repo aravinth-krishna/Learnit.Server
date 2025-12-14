@@ -38,8 +38,8 @@ namespace Learnit.Server.Controllers
         {
             var userId = GetUserId();
 
-            var weekStart = DateTime.UtcNow.Date.AddDays(-6);
-            var weekEnd = DateTime.UtcNow.Date.AddDays(1);
+            var weekStart = DateTime.UtcNow.Date;
+            var weekEnd = weekStart.AddDays(7);
 
             var userCourseIds = await _db.Courses
                 .Where(c => c.UserId == userId)
@@ -47,29 +47,34 @@ namespace Learnit.Server.Controllers
                 .ToListAsync();
 
             var weeklyEvents = await _db.ScheduleEvents
+                .Include(e => e.CourseModule)
                 .Where(e => e.UserId == userId &&
                            e.StartUtc >= weekStart &&
-                           e.StartUtc < weekEnd &&
-                           e.EndUtc.HasValue)
-                .ToListAsync();
-
-            var weeklySessions = await _db.StudySessions
-                .Where(s => s.IsCompleted && userCourseIds.Contains(s.CourseId) &&
-                            s.StartTime.Date >= weekStart && s.StartTime.Date < weekEnd)
+                           e.StartUtc < weekEnd)
                 .ToListAsync();
 
             var weeklyData = new List<WeeklyDataPoint>();
-            for (int i = 6; i >= 0; i--)
+            for (int i = 0; i < 7; i++)
             {
-                var date = DateTime.UtcNow.Date.AddDays(-i);
+                var date = weekStart.AddDays(i);
 
                 var scheduled = weeklyEvents
                     .Where(e => e.StartUtc.Date == date)
-                    .Sum(e => (decimal)(e.EndUtc!.Value - e.StartUtc).TotalHours);
+                    .Sum(e =>
+                    {
+                        var end = e.EndUtc ?? e.StartUtc.AddHours(1);
+                        return (decimal)(end - e.StartUtc).TotalHours;
+                    });
 
-                var completed = weeklySessions
-                    .Where(s => s.StartTime.Date == date)
-                    .Sum(s => s.DurationHours);
+                var completed = weeklyEvents
+                    .Where(e => e.StartUtc.Date == date)
+                    .Sum(e =>
+                    {
+                        var end = e.EndUtc ?? e.StartUtc.AddHours(1);
+                        var hours = (decimal)(end - e.StartUtc).TotalHours;
+                        var isDone = e.CourseModule?.IsCompleted == true || (e.EndUtc ?? e.StartUtc) <= DateTime.UtcNow;
+                        return isDone ? hours : 0;
+                    });
 
                 weeklyData.Add(new WeeklyDataPoint
                 {
@@ -93,11 +98,15 @@ namespace Learnit.Server.Controllers
                 .ToListAsync();
 
             var scheduledLookup = await _db.ScheduleEvents
-                .Where(e => e.UserId == userId && e.CourseModuleId.HasValue && e.EndUtc.HasValue)
+                .Where(e => e.UserId == userId && e.CourseModuleId.HasValue)
                 .Include(e => e.CourseModule)
                 .Where(e => e.CourseModule != null)
                 .GroupBy(e => e.CourseModule!.CourseId)
-                .Select(g => new { CourseId = g.Key, Hours = g.Sum(e => (decimal)(e.EndUtc!.Value - e.StartUtc).TotalHours) })
+                .Select(g => new
+                {
+                    CourseId = g.Key,
+                    Hours = g.Sum(e => (decimal)((e.EndUtc ?? e.StartUtc.AddHours(1)) - e.StartUtc).TotalHours)
+                })
                 .ToDictionaryAsync(k => k.CourseId, v => v.Hours);
 
             var completedLookup = await _db.StudySessions
