@@ -81,16 +81,36 @@ namespace Learnit.Server.Controllers
         {
             var totalModules = course.Modules.Count;
             var completedModules = course.Modules.Count(m => m.IsCompleted);
-            var totalEstimated = course.Modules.Sum(m => m.EstimatedHours);
-            var completedEstimated = course.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
+            var moduleHours = course.Modules.Sum(m => m.EstimatedHours);
+            var subModuleHours = course.Modules.SelectMany(m => m.SubModules).Sum(sm => sm.EstimatedHours);
+
+            var totalEstimated = moduleHours + subModuleHours;
+            if (totalEstimated == 0 && course.TotalEstimatedHours > 0)
+            {
+                totalEstimated = course.TotalEstimatedHours;
+            }
+
+            var completedModuleHours = course.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
+            var completedSubModuleHours = course.Modules
+                .SelectMany(m => m.SubModules)
+                .Where(sm => sm.IsCompleted)
+                .Sum(sm => sm.EstimatedHours);
+
+            var completedEstimated = completedModuleHours + completedSubModuleHours;
 
             var progressPct = totalModules > 0
                 ? Math.Round((decimal)completedModules * 100 / totalModules, 1)
-                : 0;
+                : (totalEstimated > 0 && completedLookup.TryGetValue(course.Id, out var completedFromHours) && completedFromHours > 0)
+                    ? Math.Round(completedFromHours * 100 / totalEstimated, 1)
+                    : 0;
 
             var scheduledHours = scheduledLookup.TryGetValue(course.Id, out var sh) ? sh : 0;
             var completedHours = completedLookup.TryGetValue(course.Id, out var ch) ? ch : 0;
-            var hoursRemaining = Math.Max(0, totalEstimated - completedEstimated);
+
+            var effectiveCompleted = Math.Max(completedEstimated, completedHours);
+            var hoursRemaining = totalEstimated > 0
+                ? Math.Max(0, totalEstimated - effectiveCompleted)
+                : 0;
 
             return new CourseProgressSnapshot(
                 totalModules,
@@ -103,8 +123,19 @@ namespace Learnit.Server.Controllers
 
         private static int CalculateHoursRemainingFromModules(Course course)
         {
-            var completedEstimated = course.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
-            return Math.Max(0, course.TotalEstimatedHours - completedEstimated);
+            var moduleHours = course.Modules.Sum(m => m.EstimatedHours);
+            var subModuleHours = course.Modules.SelectMany(m => m.SubModules).Sum(sm => sm.EstimatedHours);
+            var totalEstimated = moduleHours + subModuleHours;
+
+            var completedModuleHours = course.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
+            var completedSubModuleHours = course.Modules
+                .SelectMany(m => m.SubModules)
+                .Where(sm => sm.IsCompleted)
+                .Sum(sm => sm.EstimatedHours);
+
+            var completedEstimated = completedModuleHours + completedSubModuleHours;
+
+            return Math.Max(0, totalEstimated - completedEstimated);
         }
 
         [HttpGet]
