@@ -63,8 +63,15 @@ namespace Learnit.Server.Controllers
             var systemPrompt = "You are Learnit AI. RESPOND WITH ONLY MINIFIED JSON (no prose, no code fences) matching: {title, description, subjectArea, learningObjectives:[3-6 short strings], difficulty, priority, totalEstimatedHours:int, targetCompletionDate:'yyyy-MM-dd', notes, modules:[{title, description, estimatedHours:int, subModules:[{title, description, estimatedHours:int}]}]}. Hard rules: (1) Always include at least 4 modules; each module has >=2 subModules. (2) All estimatedHours are positive integers; if missing, set 2 for modules and 1 for subModules. (3) Make titles/descriptions specific to the prompt. (4) learningObjectives must be outcome-focused bullets (no numbering). (5) targetCompletionDate must be within 30-90 days from today in 'yyyy-MM-dd'. (6) difficulty ∈ {Beginner, Intermediate, Advanced}, priority ∈ {High, Medium, Low}. (7) No markdown, no extra text—pure JSON only.";
             var reply = await _provider.GenerateAsync(systemPrompt, request.Prompt, null, cancellationToken);
 
+            // Temporary diagnostics for client debugging
+            Console.WriteLine("[AI raw create-course reply]");
+            Console.WriteLine(reply);
+
             var parsed = TryParseCourseJson(reply) ?? BuildHeuristicCourse(request.Prompt);
             var normalized = NormalizeCourse(parsed);
+
+            Console.WriteLine("[AI parsed course]");
+            Console.WriteLine(JsonSerializer.Serialize(normalized));
             return Ok(normalized);
         }
 
@@ -94,44 +101,56 @@ namespace Learnit.Server.Controllers
         {
             try
             {
-                var json = ExtractJsonBlock(reply);
-                using var doc = JsonDocument.Parse(json);
+                var json = RepairJson(ExtractJsonBlock(reply));
+                using var doc = JsonDocument.Parse(json, new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = true,
+                    CommentHandling = JsonCommentHandling.Skip,
+                });
+
                 var root = doc.RootElement;
+                if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 0)
+                {
+                    root = root[0];
+                }
+
                 var resp = new AiCourseGenerateResponse
                 {
-                    Title = root.TryGetProperty("title", out var titleEl) ? titleEl.GetString() ?? string.Empty : string.Empty,
-                    Description = root.TryGetProperty("description", out var descEl) ? descEl.GetString() ?? string.Empty : string.Empty,
-                    SubjectArea = root.TryGetProperty("subjectArea", out var subj) ? subj.GetString() ?? string.Empty : string.Empty,
+                    Title = GetString(root, "title"),
+                    Description = GetString(root, "description"),
+                    SubjectArea = GetString(root, "subjectArea", "subject_area"),
                     LearningObjectives = ParseLearningObjectives(root),
-                    Difficulty = root.TryGetProperty("difficulty", out var diff) ? diff.GetString() ?? string.Empty : string.Empty,
-                    Priority = root.TryGetProperty("priority", out var pr) ? pr.GetString() ?? string.Empty : string.Empty,
-                    TotalEstimatedHours = ParseHours(root, "totalEstimatedHours", 0),
-                    TargetCompletionDate = root.TryGetProperty("targetCompletionDate", out var tcd) ? tcd.GetString() ?? string.Empty : string.Empty,
-                    Notes = root.TryGetProperty("notes", out var nts) ? nts.GetString() ?? string.Empty : string.Empty,
+                    Difficulty = GetString(root, "difficulty"),
+                    Priority = GetString(root, "priority"),
+                    TotalEstimatedHours = ParseHours(root, 0, "totalEstimatedHours", "total_estimated_hours", "hours"),
+                    TargetCompletionDate = GetString(root, "targetCompletionDate", "target_completion_date"),
+                    Notes = GetString(root, "notes"),
                     Modules = new List<AiModuleDraft>()
                 };
 
-                if (root.TryGetProperty("modules", out var modules) && modules.ValueKind == JsonValueKind.Array)
+                var modules = GetProperty(root, "modules");
+                if (modules?.ValueKind == JsonValueKind.Array)
                 {
-                    foreach (var m in modules.EnumerateArray())
+                    foreach (var m in modules.Value.EnumerateArray())
                     {
                         var moduleDraft = new AiModuleDraft
                         {
-                            Title = m.TryGetProperty("title", out var mt) ? mt.GetString() ?? "Module" : "Module",
-                            Description = m.TryGetProperty("description", out var md) ? md.GetString() ?? string.Empty : string.Empty,
-                            EstimatedHours = ParseHours(m, "estimatedHours", 0),
+                            Title = GetString(m, "title", "Module"),
+                            Description = GetString(m, "description"),
+                            EstimatedHours = ParseHours(m, 0, "estimatedHours", "estimated_hours", "hours"),
                             SubModules = new List<AiSubModuleDraft>()
                         };
 
-                        if (m.TryGetProperty("subModules", out var subs) && subs.ValueKind == JsonValueKind.Array)
+                        var subs = GetProperty(m, "subModules") ?? GetProperty(m, "submodules") ?? GetProperty(m, "sub_modules");
+                        if (subs?.ValueKind == JsonValueKind.Array)
                         {
-                            foreach (var s in subs.EnumerateArray())
+                            foreach (var s in subs.Value.EnumerateArray())
                             {
                                 moduleDraft.SubModules.Add(new AiSubModuleDraft
                                 {
-                                    Title = s.TryGetProperty("title", out var st) ? st.GetString() ?? "Submodule" : "Submodule",
-                                    EstimatedHours = ParseHours(s, "estimatedHours", 0),
-                                    Description = s.TryGetProperty("description", out var sd) ? sd.GetString() ?? string.Empty : string.Empty
+                                    Title = GetString(s, "title", "Submodule"),
+                                    EstimatedHours = ParseHours(s, 0, "estimatedHours", "estimated_hours", "hours"),
+                                    Description = GetString(s, "description"),
                                 });
                             }
                         }
@@ -153,10 +172,73 @@ namespace Learnit.Server.Controllers
             }
         }
 
+        private static JsonElement? GetProperty(JsonElement element, string name)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return prop.Value;
+                }
+            }
+
+            return null;
+        }
+
+        private static string GetString(JsonElement element, string name, string fallback = "")
+        {
+            return GetString(element, fallback, name);
+        }
+
+        private static string GetString(JsonElement element, string fallback, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                var prop = GetProperty(element, name);
+                if (prop is null) continue;
+
+                if (prop.Value.ValueKind == JsonValueKind.String)
+                {
+                    var val = prop.Value.GetString();
+                    if (!string.IsNullOrEmpty(val)) return val;
+                }
+            }
+
+            return fallback;
+        }
+
+        private static string RepairJson(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return json;
+
+            // Fill missing estimatedHours with 1 when value is absent
+            var filledHours = Regex.Replace(
+                json,
+                @"""estimatedHours""\s*:\s*(?=[}\]]|$)",
+                @"""estimatedHours"":1",
+                RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+            // Trim trailing commas before a closing brace/bracket
+            var cleaned = Regex.Replace(filledHours, @",\s*(?=[}\]])", string.Empty);
+
+            int openObj = cleaned.Count(c => c == '{');
+            int closeObj = cleaned.Count(c => c == '}');
+            int openArr = cleaned.Count(c => c == '[');
+            int closeArr = cleaned.Count(c => c == ']');
+
+            var sb = new System.Text.StringBuilder(cleaned);
+            for (int i = 0; i < openObj - closeObj; i++) sb.Append('}');
+            for (int i = 0; i < openArr - closeArr; i++) sb.Append(']');
+
+            return sb.ToString();
+        }
+
         private static string ParseLearningObjectives(JsonElement root)
         {
-            if (!root.TryGetProperty("learningObjectives", out var goals)) return string.Empty;
+            var goalsProp = GetProperty(root, "learningObjectives");
+            if (goalsProp is null) return string.Empty;
 
+            var goals = goalsProp.Value;
             if (goals.ValueKind == JsonValueKind.Array)
             {
                 var items = goals
@@ -172,24 +254,33 @@ namespace Learnit.Server.Controllers
             return goals.GetString() ?? string.Empty;
         }
 
-        private static int ParseHours(JsonElement element, string propertyName, int fallback)
+        private static int ParseHours(JsonElement element, int fallback, params string[] propertyNames)
         {
-            if (!element.TryGetProperty(propertyName, out var prop)) return fallback;
+            foreach (var name in propertyNames)
+            {
+                var propNullable = GetProperty(element, name);
+                if (propNullable is null) continue;
+                var prop = propNullable.Value;
 
-            try
-            {
-                return prop.ValueKind switch
+                try
                 {
-                    JsonValueKind.Number when prop.TryGetInt32(out var i) => i,
-                    JsonValueKind.Number when prop.TryGetDouble(out var d) => (int)Math.Round(d),
-                    JsonValueKind.String when int.TryParse(prop.GetString(), out var s) => s,
-                    _ => fallback
-                };
+                    var value = prop.ValueKind switch
+                    {
+                        JsonValueKind.Number when prop.TryGetInt32(out var i) => i,
+                        JsonValueKind.Number when prop.TryGetDouble(out var d) => (int)Math.Round(d),
+                        JsonValueKind.String when int.TryParse(prop.GetString(), out var s) => s,
+                        _ => (int?)null
+                    };
+
+                    if (value.HasValue) return value.Value;
+                }
+                catch
+                {
+                    // continue trying other names
+                }
             }
-            catch
-            {
-                return fallback;
-            }
+
+            return fallback;
         }
 
         private static AiCourseGenerateResponse NormalizeCourse(AiCourseGenerateResponse resp)
