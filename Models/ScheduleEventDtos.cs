@@ -26,6 +26,7 @@ namespace Learnit.Server.Models
         public string Title { get; set; } = "";
         public int CourseId { get; set; }
         public string CourseTitle { get; set; } = "";
+        public bool IsCompleted { get; set; }
     }
 }
 

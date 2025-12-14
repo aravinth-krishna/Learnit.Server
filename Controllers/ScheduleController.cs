@@ -93,7 +93,8 @@ namespace Learnit.Server.Controllers
                         Id = e.CourseModule.Id,
                         Title = e.CourseModule.Title,
                         CourseId = e.CourseModule.CourseId,
-                        CourseTitle = e.CourseModule.Course?.Title ?? string.Empty
+                        CourseTitle = e.CourseModule.Course?.Title ?? string.Empty,
+                        IsCompleted = e.CourseModule.IsCompleted
                     }
             }).ToList();
 
@@ -222,31 +223,17 @@ namespace Learnit.Server.Controllers
         public async Task<IActionResult> AutoScheduleModules([FromBody] AutoScheduleRequest request)
         {
             var userId = GetUserId();
-            var user = await _db.Users.FindAsync(userId);
-
-            if (user == null)
-            {
-                return Unauthorized();
-            }
-
             var includeWeekends = request.IncludeWeekends ?? false;
-            var preferredStartHour = Math.Clamp(request.PreferredStartHour ?? 8, 5, 12);
+            var preferredStartHour = Math.Clamp(request.PreferredStartHour ?? 9, 5, 12);
             var preferredEndHour = Math.Clamp(request.PreferredEndHour ?? 18, preferredStartHour + 2, 22);
-            var focusPreference = request.FocusPreference?.ToLowerInvariant() ?? "morning";
 
-            var maxSessionMinutes = Math.Clamp(request.MaxSessionMinutes ?? user.MaxSessionMinutes, 30, 180);
+            var maxSessionMinutes = Math.Clamp(request.MaxSessionMinutes ?? 90, 30, 180);
             var maxBlockHours = maxSessionMinutes / 60d;
             var bufferMinutes = Math.Clamp(request.BufferMinutes ?? 15, 5, 45);
 
-            var weeklyLimitHours = request.WeeklyLimitHours ?? user.WeeklyStudyLimitHours;
-            var maxDailyHours = request.MaxDailyHours ?? Math.Max(3, Math.Min(8, weeklyLimitHours > 0 ? weeklyLimitHours / 3 : 6));
-
-            var speedMultiplier = user.StudySpeed.ToLowerInvariant() switch
-            {
-                "slow" => 1.25,
-                "fast" => 0.9,
-                _ => 1.0
-            };
+            var windowHours = Math.Max(2, preferredEndHour - preferredStartHour);
+            var maxDailyHours = Math.Clamp(request.MaxDailyHours ?? Math.Min(windowHours, 6), 2, windowHours);
+            var weeklyLimitHours = request.WeeklyLimitHours ?? 20;
 
             // Get available modules ordered by urgency and priority
             var scheduledModuleIds = await _db.ScheduleEvents
@@ -256,11 +243,23 @@ namespace Learnit.Server.Controllers
 
             var modulesToSchedule = await _db.CourseModules
                 .Include(cm => cm.Course)
-                .Where(cm => cm.Course!.UserId == userId && !scheduledModuleIds.Contains(cm.Id) && cm.Course!.IsActive)
+                .Where(cm => cm.Course!.UserId == userId && !scheduledModuleIds.Contains(cm.Id) && cm.Course!.IsActive && !cm.IsCompleted)
                 .OrderBy(cm => cm.Course!.TargetCompletionDate ?? DateTime.MaxValue)
                 .ThenBy(cm => cm.Course!.Priority == "High" ? 1 : cm.Course!.Priority == "Medium" ? 2 : 3)
                 .ThenBy(cm => cm.Order)
                 .ToListAsync();
+
+            var occupiedIntervals = (await _db.ScheduleEvents
+                .Where(e => e.UserId == userId)
+                .Select(e => new
+                {
+                    Start = e.StartUtc,
+                    End = e.EndUtc ?? e.StartUtc.AddHours(1)
+                })
+                .ToListAsync())
+                .Select(e => (Start: EnsureUtc(e.Start), End: EnsureUtc(e.End)))
+                .OrderBy(e => e.Start)
+                .ToList();
 
             var events = new List<ScheduleEvent>();
             var currentTime = EnsureUtc(request.StartDateTime ?? DateTime.UtcNow);
@@ -293,16 +292,6 @@ namespace Learnit.Server.Controllers
                     aligned = aligned.AddDays(1).Date.AddHours(preferredStartHour);
                 }
 
-                // Soft preference nudge
-                if (focusPreference == "morning" && aligned.Hour > preferredStartHour + 2)
-                {
-                    aligned = aligned.Date.AddHours(preferredStartHour);
-                }
-                else if (focusPreference == "evening" && aligned.Hour < Math.Max(preferredStartHour, preferredEndHour - 3))
-                {
-                    aligned = aligned.Date.AddHours(Math.Max(preferredStartHour, preferredEndHour - 3));
-                }
-
                 // Avoid lunch window when it sits inside the work window
                 if (preferredStartHour < lunchStartHour && preferredEndHour > lunchEndHour)
                 {
@@ -324,9 +313,24 @@ namespace Learnit.Server.Controllers
             double currentDayHours = 0;
             var weeklyHours = new Dictionary<DateTime, double>();
 
+            bool HasOverlap(DateTime start, DateTime end, out DateTime nextStart)
+            {
+                foreach (var interval in occupiedIntervals)
+                {
+                    if (start < interval.End && end > interval.Start)
+                    {
+                        nextStart = EnsureUtc(interval.End.AddMinutes(bufferMinutes));
+                        return true;
+                    }
+                }
+
+                nextStart = DateTime.MinValue;
+                return false;
+            }
+
             foreach (var module in modulesToSchedule)
             {
-                double remainingHours = Math.Max(1, module.EstimatedHours * speedMultiplier);
+                double remainingHours = Math.Max(1, module.EstimatedHours);
 
                 // Slightly smaller blocks for advanced material
                 var difficultyCap = module.Course?.Difficulty == "Advanced" ? Math.Min(maxBlockHours, 1.0) : maxBlockHours;
@@ -388,6 +392,12 @@ namespace Learnit.Server.Controllers
 
                     var endTime = currentTime.AddHours(blockHours);
 
+                    if (HasOverlap(currentTime, endTime, out var nextStart))
+                    {
+                        currentTime = AlignToWorkWindow(nextStart);
+                        continue;
+                    }
+
                     // Do not cross the lunch gap
                     if (preferredStartHour < lunchStartHour && preferredEndHour > lunchEndHour && currentTime < currentTime.Date.AddHours(lunchStartHour) && endTime > currentTime.Date.AddHours(lunchStartHour))
                     {
@@ -408,6 +418,7 @@ namespace Learnit.Server.Controllers
                     };
 
                     events.Add(scheduleEvent);
+                    occupiedIntervals.Add((scheduleEvent.StartUtc, scheduleEvent.EndUtc ?? scheduleEvent.StartUtc.AddMinutes(maxSessionMinutes)));
 
                     remainingHours -= blockHours;
                     currentDayHours += blockHours;
@@ -436,7 +447,17 @@ namespace Learnit.Server.Controllers
                     StartUtc = e.StartUtc,
                     EndUtc = e.EndUtc,
                     AllDay = e.AllDay,
-                    CourseModuleId = e.CourseModuleId
+                    CourseModuleId = e.CourseModuleId,
+                    CourseModule = e.CourseModuleId.HasValue
+                        ? new CourseModuleInfo
+                        {
+                            Id = e.CourseModuleId.Value,
+                            Title = e.Title,
+                            CourseId = modulesToSchedule.First(m => m.Id == e.CourseModuleId.Value).CourseId,
+                            CourseTitle = modulesToSchedule.First(m => m.Id == e.CourseModuleId.Value).Course!.Title,
+                            IsCompleted = modulesToSchedule.First(m => m.Id == e.CourseModuleId.Value).IsCompleted
+                        }
+                        : null
                 })
             });
         }
@@ -501,7 +522,6 @@ namespace Learnit.Server.Controllers
         public int? MaxSessionMinutes { get; set; }
         public int? BufferMinutes { get; set; }
         public int? WeeklyLimitHours { get; set; }
-        public string? FocusPreference { get; set; }
     }
     
 }
