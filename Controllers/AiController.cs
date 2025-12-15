@@ -60,14 +60,14 @@ namespace Learnit.Server.Controllers
         [HttpPost("create-course")]
         public async Task<ActionResult<AiCourseGenerateResponse>> CreateCourse([FromBody] AiCourseGenerateRequest request, CancellationToken cancellationToken)
         {
-            var systemPrompt = "You are Learnit AI. RESPOND WITH ONLY MINIFIED JSON (no prose, no code fences) matching: {title, description, subjectArea, learningObjectives:[3-6 short strings], difficulty, priority, totalEstimatedHours:int, targetCompletionDate:'yyyy-MM-dd', notes, modules:[{title, description, estimatedHours:int, subModules:[{title, description, estimatedHours:int}]}]}. Hard rules: (1) Always include at least 4 modules; each module has >=2 subModules. (2) All estimatedHours are positive integers; if missing, set 2 for modules and 1 for subModules. (3) Make titles/descriptions specific to the prompt. (4) learningObjectives must be outcome-focused bullets (no numbering). (5) targetCompletionDate must be within 30-90 days from today in 'yyyy-MM-dd'. (6) difficulty ∈ {Beginner, Intermediate, Advanced}, priority ∈ {High, Medium, Low}. (7) No markdown, no extra text—pure JSON only.";
+            var systemPrompt = "You are Learnit AI. RESPOND WITH ONLY MINIFIED JSON (no prose, no code fences) matching: {title, description (optional, can be empty), subjectArea, learningObjectives:[3-6 short strings], difficulty, priority, totalEstimatedHours:int, targetCompletionDate:'yyyy-MM-dd', notes, modules:[{title, description (optional), estimatedHours:int, subModules:[{title, description (optional), estimatedHours:int}]}]}. Hard rules: (1) Always include at least 4 modules; each module has >=2 subModules. (2) All estimatedHours are positive integers; if missing, set 2 for modules and 1 for subModules. (3) Make titles specific to the prompt; descriptions are optional. (4) learningObjectives must be outcome-focused bullets (no numbering). (5) targetCompletionDate must be within 30-90 days from today in 'yyyy-MM-dd'. (6) difficulty ∈ {Beginner, Intermediate, Advanced}, priority ∈ {High, Medium, Low}. (7) No markdown, no extra text—pure JSON only. (8) Ensure the JSON is syntactically valid; never put objects in quotes (no \"{...}\").";
             var reply = await _provider.GenerateAsync(systemPrompt, request.Prompt, null, cancellationToken);
 
             // Temporary diagnostics for client debugging
             Console.WriteLine("[AI raw create-course reply]");
             Console.WriteLine(reply);
 
-            var parsed = TryParseCourseJson(reply) ?? BuildHeuristicCourse(request.Prompt);
+            var parsed = TryParseCourseJson(reply, request.Prompt) ?? BuildHeuristicCourse(request.Prompt);
             var normalized = NormalizeCourse(parsed);
 
             Console.WriteLine("[AI parsed course]");
@@ -97,47 +97,199 @@ namespace Learnit.Server.Controllers
             return reply;
         }
 
-        private static AiCourseGenerateResponse? TryParseCourseJson(string reply)
+        private static AiCourseGenerateResponse? TryParseCourseJson(string reply, string prompt)
         {
+            foreach (var candidate in BuildJsonCandidates(ExtractJsonBlock(reply)))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(candidate, new JsonDocumentOptions
+                    {
+                        AllowTrailingCommas = true,
+                        CommentHandling = JsonCommentHandling.Skip,
+                    });
+
+                    var root = doc.RootElement;
+                    if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 0)
+                    {
+                        root = root[0];
+                    }
+
+                    var resp = new AiCourseGenerateResponse
+                    {
+                        Title = GetString(root, "title"),
+                        Description = GetString(root, "description"),
+                        SubjectArea = GetString(root, "subjectArea", "subject_area"),
+                        LearningObjectives = ParseLearningObjectives(root),
+                        Difficulty = GetString(root, "difficulty"),
+                        Priority = GetString(root, "priority"),
+                        TotalEstimatedHours = ParseHours(root, 0, "totalEstimatedHours", "total_estimated_hours", "hours"),
+                        TargetCompletionDate = GetString(root, "targetCompletionDate", "target_completion_date"),
+                        Notes = GetString(root, "notes"),
+                        Modules = new List<AiModuleDraft>()
+                    };
+
+                    var modules = GetProperty(root, "modules");
+                    if (modules?.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var m in modules.Value.EnumerateArray())
+                        {
+                            var moduleDraft = new AiModuleDraft
+                            {
+                                Title = GetString(m, "title", "Module"),
+                                Description = GetString(m, "description"),
+                                EstimatedHours = ParseHours(m, 1, "estimatedHours", "estimated_hours", "hours"),
+                                SubModules = new List<AiSubModuleDraft>()
+                            };
+
+                            var subs = GetProperty(m, "subModules") ?? GetProperty(m, "submodules") ?? GetProperty(m, "sub_modules");
+                            if (subs?.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var s in subs.Value.EnumerateArray())
+                                {
+                                    moduleDraft.SubModules.Add(new AiSubModuleDraft
+                                    {
+                                        Title = GetString(s, "title", "Submodule"),
+                                        EstimatedHours = ParseHours(s, 1, "estimatedHours", "estimated_hours", "hours"),
+                                        Description = GetString(s, "description"),
+                                    });
+                                }
+                            }
+
+                            resp.Modules.Add(moduleDraft);
+                        }
+                    }
+
+                    if (resp.Modules.Count == 0)
+                    {
+                        resp.Modules.Add(new AiModuleDraft { Title = "Module 1", EstimatedHours = 2 });
+                    }
+
+                    return resp;
+                }
+                catch
+                {
+                    // try next candidate
+                }
+            }
+
+            // Salvage just the modules when the full parse fails (common with truncated JSON)
+            var salvage = ParseModulesOnly(reply, prompt);
+            if (salvage is not null) return salvage;
+
+            return null;
+        }
+
+        private static AiCourseGenerateResponse? ParseModulesOnly(string reply, string prompt)
+        {
+            var idx = reply.IndexOf("\"modules\"", StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return null;
+
+            var startBracket = reply.IndexOf('[', idx);
+            if (startBracket < 0) return null;
+
+            int depth = 0;
+            for (int i = startBracket; i < reply.Length; i++)
+            {
+                if (reply[i] == '[') depth++;
+                if (reply[i] == ']') depth--;
+                if (depth == 0)
+                {
+                    var modulesSlice = reply.Substring(startBracket, i - startBracket + 1);
+                    var candidate = RepairJson($"{{\"modules\": {modulesSlice}}}");
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(candidate, new JsonDocumentOptions
+                        {
+                            AllowTrailingCommas = true,
+                            CommentHandling = JsonCommentHandling.Skip,
+                        });
+
+                        var resp = new AiCourseGenerateResponse
+                        {
+                            Title = DeriveTitle(prompt),
+                            SubjectArea = DeriveSubject(prompt),
+                            Difficulty = "Beginner",
+                            Priority = "Medium",
+                            TargetCompletionDate = DateTime.UtcNow.AddDays(28).ToString("yyyy-MM-dd"),
+                            Modules = new List<AiModuleDraft>()
+                        };
+
+                        var modules = doc.RootElement.GetProperty("modules");
+                        if (modules.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var m in modules.EnumerateArray())
+                            {
+                                var moduleDraft = new AiModuleDraft
+                                {
+                                    Title = GetString(m, "title", "Module"),
+                                    Description = string.Empty,
+                                    EstimatedHours = ParseHours(m, 2, "estimatedHours", "hours"),
+                                    SubModules = new List<AiSubModuleDraft>()
+                                };
+
+                                var subs = GetProperty(m, "subModules") ?? GetProperty(m, "submodules") ?? GetProperty(m, "sub_modules");
+                                if (subs?.ValueKind == JsonValueKind.Array)
+                                {
+                                    foreach (var s in subs.Value.EnumerateArray())
+                                    {
+                                        moduleDraft.SubModules.Add(new AiSubModuleDraft
+                                        {
+                                            Title = GetString(s, "title", "Submodule"),
+                                            EstimatedHours = ParseHours(s, 1, "estimatedHours", "hours"),
+                                            Description = string.Empty,
+                                        });
+                                    }
+                                }
+
+                                resp.Modules.Add(moduleDraft);
+                            }
+                        }
+
+                        if (!resp.Modules.Any()) return null;
+
+                        resp.TotalEstimatedHours = resp.Modules.Sum(m => Math.Max(1, m.EstimatedHours));
+                        return resp;
+                    }
+                    catch
+                    {
+                        return null;
+                    }
+                }
+            }
+
+            // If the reply is truncated mid-array, salvage what we have by repairing + closing.
             try
             {
-                var json = RepairJson(ExtractJsonBlock(reply));
-                using var doc = JsonDocument.Parse(json, new JsonDocumentOptions
+                var modulesSlice = reply.Substring(startBracket);
+                var candidate = RepairJson($"{{\"modules\": {modulesSlice}}}");
+
+                using var doc = JsonDocument.Parse(candidate, new JsonDocumentOptions
                 {
                     AllowTrailingCommas = true,
                     CommentHandling = JsonCommentHandling.Skip,
                 });
 
-                var root = doc.RootElement;
-                if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 0)
-                {
-                    root = root[0];
-                }
-
                 var resp = new AiCourseGenerateResponse
                 {
-                    Title = GetString(root, "title"),
-                    Description = GetString(root, "description"),
-                    SubjectArea = GetString(root, "subjectArea", "subject_area"),
-                    LearningObjectives = ParseLearningObjectives(root),
-                    Difficulty = GetString(root, "difficulty"),
-                    Priority = GetString(root, "priority"),
-                    TotalEstimatedHours = ParseHours(root, 0, "totalEstimatedHours", "total_estimated_hours", "hours"),
-                    TargetCompletionDate = GetString(root, "targetCompletionDate", "target_completion_date"),
-                    Notes = GetString(root, "notes"),
+                    Title = DeriveTitle(prompt),
+                    SubjectArea = DeriveSubject(prompt),
+                    Difficulty = "Beginner",
+                    Priority = "Medium",
+                    TargetCompletionDate = DateTime.UtcNow.AddDays(45).ToString("yyyy-MM-dd"),
                     Modules = new List<AiModuleDraft>()
                 };
 
-                var modules = GetProperty(root, "modules");
-                if (modules?.ValueKind == JsonValueKind.Array)
+                var modules = doc.RootElement.GetProperty("modules");
+                if (modules.ValueKind == JsonValueKind.Array)
                 {
-                    foreach (var m in modules.Value.EnumerateArray())
+                    foreach (var m in modules.EnumerateArray())
                     {
                         var moduleDraft = new AiModuleDraft
                         {
                             Title = GetString(m, "title", "Module"),
-                            Description = GetString(m, "description"),
-                            EstimatedHours = ParseHours(m, 0, "estimatedHours", "estimated_hours", "hours"),
+                            Description = string.Empty,
+                            EstimatedHours = ParseHours(m, 2, "estimatedHours", "hours"),
                             SubModules = new List<AiSubModuleDraft>()
                         };
 
@@ -149,8 +301,8 @@ namespace Learnit.Server.Controllers
                                 moduleDraft.SubModules.Add(new AiSubModuleDraft
                                 {
                                     Title = GetString(s, "title", "Submodule"),
-                                    EstimatedHours = ParseHours(s, 0, "estimatedHours", "estimated_hours", "hours"),
-                                    Description = GetString(s, "description"),
+                                    EstimatedHours = ParseHours(s, 1, "estimatedHours", "hours"),
+                                    Description = string.Empty,
                                 });
                             }
                         }
@@ -159,17 +311,44 @@ namespace Learnit.Server.Controllers
                     }
                 }
 
-                if (resp.Modules.Count == 0)
-                {
-                    resp.Modules.Add(new AiModuleDraft { Title = "Module 1", EstimatedHours = 2 });
-                }
-
+                if (!resp.Modules.Any()) return null;
+                resp.TotalEstimatedHours = resp.Modules.Sum(m => Math.Max(1, m.EstimatedHours));
                 return resp;
             }
             catch
             {
                 return null;
             }
+        }
+
+        private static IEnumerable<string> BuildJsonCandidates(string raw)
+        {
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                yield return raw;
+
+                var trimmed = TrimAfterLastBrace(raw);
+                if (trimmed != raw)
+                    yield return trimmed;
+
+                var repaired = RepairJson(raw);
+                if (repaired != raw)
+                    yield return repaired;
+
+                var repairedTrimmed = RepairJson(trimmed);
+                if (repairedTrimmed != repaired)
+                    yield return repairedTrimmed;
+            }
+        }
+
+        private static string TrimAfterLastBrace(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return text;
+
+            var lastObj = text.LastIndexOf('}');
+            var lastArr = text.LastIndexOf(']');
+            var cut = Math.Max(lastObj, lastArr);
+            return cut > 0 ? text.Substring(0, cut + 1) : text;
         }
 
         private static JsonElement? GetProperty(JsonElement element, string name)
@@ -187,7 +366,8 @@ namespace Learnit.Server.Controllers
 
         private static string GetString(JsonElement element, string name, string fallback = "")
         {
-            return GetString(element, fallback, name);
+            // Important: avoid overload recursion by binding explicitly to the params overload.
+            return GetString(element, fallback, names: new[] { name });
         }
 
         private static string GetString(JsonElement element, string fallback, params string[] names)
@@ -197,10 +377,31 @@ namespace Learnit.Server.Controllers
                 var prop = GetProperty(element, name);
                 if (prop is null) continue;
 
-                if (prop.Value.ValueKind == JsonValueKind.String)
+                try
                 {
-                    var val = prop.Value.GetString();
-                    if (!string.IsNullOrEmpty(val)) return val;
+                    var valueKind = prop.Value.ValueKind;
+                    if (valueKind == JsonValueKind.String)
+                    {
+                        var val = prop.Value.GetString();
+                        if (!string.IsNullOrEmpty(val)) return val;
+                    }
+                    else if (valueKind == JsonValueKind.Number && prop.Value.TryGetDouble(out var d))
+                    {
+                        return d.ToString();
+                    }
+                    else if (valueKind == JsonValueKind.True || valueKind == JsonValueKind.False)
+                    {
+                        return prop.Value.GetBoolean().ToString();
+                    }
+                    else if (valueKind != JsonValueKind.Undefined && valueKind != JsonValueKind.Null)
+                    {
+                        var val = prop.Value.ToString();
+                        if (!string.IsNullOrEmpty(val)) return val;
+                    }
+                }
+                catch
+                {
+                    // ignore and try next name
                 }
             }
 
@@ -221,14 +422,32 @@ namespace Learnit.Server.Controllers
             // Trim trailing commas before a closing brace/bracket
             var cleaned = Regex.Replace(filledHours, @",\s*(?=[}\]])", string.Empty);
 
+            // Fix a common LLM failure mode where objects inside arrays are accidentally wrapped
+            // with a leading quote, e.g.  ,"{"title":"..."}  (invalid JSON).
+            // Remove the stray quote when it appears right before an object that follows '[' or ','.
+            cleaned = Regex.Replace(
+                cleaned,
+                "(?<=\\[|,)\\s*\"(?=\\s*\\{)",
+                string.Empty,
+                RegexOptions.Multiline);
+
+            // Remove a stray quote immediately after a closing brace/bracket when it is followed by
+            // a comma or a closing bracket/brace (another symptom of the same mistake).
+            cleaned = Regex.Replace(
+                cleaned,
+                "(?<=[\\}\\]])\\s*\"(?=\\s*(,|\\]|\\}))",
+                string.Empty,
+                RegexOptions.Multiline);
+
             int openObj = cleaned.Count(c => c == '{');
             int closeObj = cleaned.Count(c => c == '}');
             int openArr = cleaned.Count(c => c == '[');
             int closeArr = cleaned.Count(c => c == ']');
 
             var sb = new System.Text.StringBuilder(cleaned);
-            for (int i = 0; i < openObj - closeObj; i++) sb.Append('}');
+            // Close arrays before objects. In truncated replies the common missing tail is "]}".
             for (int i = 0; i < openArr - closeArr; i++) sb.Append(']');
+            for (int i = 0; i < openObj - closeObj; i++) sb.Append('}');
 
             return sb.ToString();
         }
@@ -243,7 +462,7 @@ namespace Learnit.Server.Controllers
             {
                 var items = goals
                     .EnumerateArray()
-                    .Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() : null)
+                    .Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() : x.ToString())
                     .Where(x => !string.IsNullOrWhiteSpace(x))
                     .Select(x => x!.Trim())
                     .ToArray();
@@ -251,7 +470,12 @@ namespace Learnit.Server.Controllers
                 return string.Join("; ", items);
             }
 
-            return goals.GetString() ?? string.Empty;
+            if (goals.ValueKind == JsonValueKind.String)
+            {
+                return goals.GetString() ?? string.Empty;
+            }
+
+            return goals.ToString();
         }
 
         private static int ParseHours(JsonElement element, int fallback, params string[] propertyNames)
@@ -292,6 +516,18 @@ namespace Learnit.Server.Controllers
             resp.Priority = string.IsNullOrWhiteSpace(resp.Priority) ? "Medium" : resp.Priority.Trim();
             resp.Notes = resp.Notes?.Trim() ?? string.Empty;
 
+            // Ensure target date is usable and within 30-90 days.
+            var today = DateTime.UtcNow.Date;
+            if (!DateTime.TryParse(resp.TargetCompletionDate, out var parsedDate))
+            {
+                parsedDate = today.AddDays(45);
+            }
+            if (parsedDate < today.AddDays(30) || parsedDate > today.AddDays(90))
+            {
+                parsedDate = today.AddDays(45);
+            }
+            resp.TargetCompletionDate = parsedDate.ToString("yyyy-MM-dd");
+
             if (resp.Modules == null)
             {
                 resp.Modules = new List<AiModuleDraft>();
@@ -312,6 +548,27 @@ namespace Learnit.Server.Controllers
                 });
             }
 
+            // Ensure a minimum of 4 modules for UI + downstream expectations.
+            if (resp.Modules.Count < 4)
+            {
+                var topic = string.IsNullOrWhiteSpace(resp.SubjectArea) ? "Course" : resp.SubjectArea;
+                while (resp.Modules.Count < 4)
+                {
+                    var idx = resp.Modules.Count + 1;
+                    resp.Modules.Add(new AiModuleDraft
+                    {
+                        Title = $"Module {idx}: {topic}",
+                        Description = string.Empty,
+                        EstimatedHours = 2,
+                        SubModules = new List<AiSubModuleDraft>
+                        {
+                            new() { Title = "Lesson 1", EstimatedHours = 1, Description = string.Empty },
+                            new() { Title = "Lesson 2", EstimatedHours = 1, Description = string.Empty },
+                        }
+                    });
+                }
+            }
+
             foreach (var module in resp.Modules)
             {
                 module.Title = string.IsNullOrWhiteSpace(module.Title) ? "Module" : module.Title.Trim();
@@ -330,6 +587,17 @@ namespace Learnit.Server.Controllers
                         Title = "Submodule",
                         EstimatedHours = Math.Max(1, module.EstimatedHours / 2),
                         Description = ""
+                    });
+                }
+
+                // Ensure each module has >= 2 sub-modules.
+                while (module.SubModules.Count < 2)
+                {
+                    module.SubModules.Add(new AiSubModuleDraft
+                    {
+                        Title = $"Lesson {module.SubModules.Count + 1}",
+                        EstimatedHours = 1,
+                        Description = string.Empty
                     });
                 }
 

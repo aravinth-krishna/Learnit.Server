@@ -59,12 +59,29 @@ namespace Learnit.Server.Services
                 { "content", userPrompt }
             });
 
+            var isCourseJson = systemPrompt.Contains("MINIFIED JSON", StringComparison.OrdinalIgnoreCase)
+                || systemPrompt.Contains("pure JSON", StringComparison.OrdinalIgnoreCase);
+
+            var maxTokens = 600;
+            if (int.TryParse(_config["Ai:MaxTokens"], out var configuredMax) && configuredMax > 0)
+            {
+                maxTokens = configuredMax;
+            }
+            if (isCourseJson)
+            {
+                maxTokens = 2000;
+                if (int.TryParse(_config["Ai:MaxTokensCourse"], out var configuredCourseMax) && configuredCourseMax > 0)
+                {
+                    maxTokens = configuredCourseMax;
+                }
+            }
+
             var payload = new
             {
                 model,
                 messages,
                 temperature = 0.4,
-                max_tokens = 600
+                max_tokens = maxTokens
             };
 
             var response = await _http.PostAsync(baseUrl,

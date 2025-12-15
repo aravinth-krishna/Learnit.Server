@@ -29,7 +29,11 @@ namespace Learnit.Server
             });
 
 
-            builder.Services.AddControllers();
+            builder.Services.AddControllers().AddJsonOptions(opts =>
+            {
+                opts.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
+                opts.JsonSerializerOptions.DictionaryKeyPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
+            });
             builder.Services.AddScoped<JwtService>();
             builder.Services.AddScoped<AiContextBuilder>();
             builder.Services.AddScoped<FriendService>();
