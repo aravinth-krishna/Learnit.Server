@@ -60,7 +60,7 @@ namespace Learnit.Server.Controllers
         [HttpPost("create-course")]
         public async Task<ActionResult<AiCourseGenerateResponse>> CreateCourse([FromBody] AiCourseGenerateRequest request, CancellationToken cancellationToken)
         {
-            var systemPrompt = "You are Learnit AI. RESPOND WITH ONLY MINIFIED JSON (no prose, no code fences) matching: {title, description (optional, can be empty), subjectArea, learningObjectives:[3-6 short strings], difficulty, priority, totalEstimatedHours:int, targetCompletionDate:'yyyy-MM-dd', notes, modules:[{title, description (optional), estimatedHours:int, subModules:[{title, description (optional), estimatedHours:int}]}]}. Hard rules: (1) Always include at least 4 modules; each module has >=2 subModules. (2) All estimatedHours are positive integers; if missing, set 2 for modules and 1 for subModules. (3) Make titles specific to the prompt; descriptions are optional. (4) learningObjectives must be outcome-focused bullets (no numbering). (5) targetCompletionDate must be within 30-90 days from today in 'yyyy-MM-dd'. (6) difficulty ∈ {Beginner, Intermediate, Advanced}, priority ∈ {High, Medium, Low}. (7) No markdown, no extra text—pure JSON only. (8) Ensure the JSON is syntactically valid; never put objects in quotes (no \"{...}\").";
+            var systemPrompt = "You are Learnit AI. RESPOND WITH ONLY MINIFIED JSON (no prose, no code fences) matching: {title, description (optional, can be empty), subjectArea, learningObjectives:[3-6 short strings], difficulty, priority, totalEstimatedHours:int, targetCompletionDate:'yyyy-MM-dd', notes, modules:[{title, description (optional), estimatedHours:int, subModules:[{title, description (optional), estimatedHours:int}]}]}. Hard rules: (1) Always include at least 4 modules; each module has >=2 subModules. (2) All estimatedHours are positive integers; if missing, set 2 for modules and 1 for subModules. (3) Module/subModule titles must be plain titles only — do NOT prefix titles with labels like 'Module 2:' or 'Submodule 2.1:'. (4) Make titles specific to the prompt; descriptions are optional. (5) learningObjectives must be outcome-focused bullets (no numbering). (6) targetCompletionDate must be within 30-90 days from today in 'yyyy-MM-dd'. (7) difficulty ∈ {Beginner, Intermediate, Advanced}, priority ∈ {High, Medium, Low}. (8) No markdown, no extra text—pure JSON only. (9) Ensure the JSON is syntactically valid; never put objects in quotes (no \"{...}\").";
             var reply = await _provider.GenerateAsync(systemPrompt, request.Prompt, null, cancellationToken);
 
             // Temporary diagnostics for client debugging
@@ -162,7 +162,7 @@ namespace Learnit.Server.Controllers
 
                     if (resp.Modules.Count == 0)
                     {
-                        resp.Modules.Add(new AiModuleDraft { Title = "Module 1", EstimatedHours = 2 });
+                        resp.Modules.Add(new AiModuleDraft { Title = "Getting started", EstimatedHours = 2 });
                     }
 
                     return resp;
@@ -537,13 +537,13 @@ namespace Learnit.Server.Controllers
             {
                 resp.Modules.Add(new AiModuleDraft
                 {
-                    Title = "Module 1",
+                    Title = "Getting started",
                     Description = "Getting started",
                     EstimatedHours = resp.TotalEstimatedHours > 0 ? resp.TotalEstimatedHours : 4,
                     SubModules = new List<AiSubModuleDraft>
                     {
-                        new() { Title = "Lesson 1", EstimatedHours = 2, Description = "Overview" },
-                        new() { Title = "Lesson 2", EstimatedHours = 2, Description = "Practice" }
+                        new() { Title = "Overview", EstimatedHours = 2, Description = "Overview" },
+                        new() { Title = "Practice", EstimatedHours = 2, Description = "Practice" }
                     }
                 });
             }
@@ -557,13 +557,13 @@ namespace Learnit.Server.Controllers
                     var idx = resp.Modules.Count + 1;
                     resp.Modules.Add(new AiModuleDraft
                     {
-                        Title = $"Module {idx}: {topic}",
+                        Title = FallbackModuleTitle(idx, topic),
                         Description = string.Empty,
                         EstimatedHours = 2,
                         SubModules = new List<AiSubModuleDraft>
                         {
-                            new() { Title = "Lesson 1", EstimatedHours = 1, Description = string.Empty },
-                            new() { Title = "Lesson 2", EstimatedHours = 1, Description = string.Empty },
+                            new() { Title = FallbackSubModuleTitle(1), EstimatedHours = 1, Description = string.Empty },
+                            new() { Title = FallbackSubModuleTitle(2), EstimatedHours = 1, Description = string.Empty },
                         }
                     });
                 }
@@ -571,7 +571,9 @@ namespace Learnit.Server.Controllers
 
             foreach (var module in resp.Modules)
             {
-                module.Title = string.IsNullOrWhiteSpace(module.Title) ? "Module" : module.Title.Trim();
+                module.Title = string.IsNullOrWhiteSpace(module.Title) ? "Untitled" : module.Title.Trim();
+                module.Title = StripSectionLabel(module.Title);
+                if (string.IsNullOrWhiteSpace(module.Title)) module.Title = "Untitled";
                 module.Description = module.Description?.Trim() ?? string.Empty;
                 module.EstimatedHours = module.EstimatedHours <= 0 ? 1 : module.EstimatedHours;
 
@@ -584,7 +586,7 @@ namespace Learnit.Server.Controllers
                 {
                     module.SubModules.Add(new AiSubModuleDraft
                     {
-                        Title = "Submodule",
+                        Title = FallbackSubModuleTitle(1),
                         EstimatedHours = Math.Max(1, module.EstimatedHours / 2),
                         Description = ""
                     });
@@ -595,7 +597,7 @@ namespace Learnit.Server.Controllers
                 {
                     module.SubModules.Add(new AiSubModuleDraft
                     {
-                        Title = $"Lesson {module.SubModules.Count + 1}",
+                        Title = FallbackSubModuleTitle(module.SubModules.Count + 1),
                         EstimatedHours = 1,
                         Description = string.Empty
                     });
@@ -603,7 +605,9 @@ namespace Learnit.Server.Controllers
 
                 foreach (var sub in module.SubModules)
                 {
-                    sub.Title = string.IsNullOrWhiteSpace(sub.Title) ? "Submodule" : sub.Title.Trim();
+                    sub.Title = string.IsNullOrWhiteSpace(sub.Title) ? "Untitled" : sub.Title.Trim();
+                    sub.Title = StripSectionLabel(sub.Title);
+                    if (string.IsNullOrWhiteSpace(sub.Title)) sub.Title = "Untitled";
                     sub.Description = sub.Description?.Trim() ?? string.Empty;
                     sub.EstimatedHours = sub.EstimatedHours <= 0 ? 1 : sub.EstimatedHours;
                 }
@@ -625,6 +629,55 @@ namespace Learnit.Server.Controllers
             }
 
             return resp;
+        }
+
+        private static string StripSectionLabel(string title)
+        {
+            if (string.IsNullOrWhiteSpace(title)) return string.Empty;
+
+            var trimmed = title.Trim();
+
+            // Remove leading "Module 2:" / "Submodule 2.1 -" / "Sub module 3." etc.
+            // Keep safe: require either numbering or punctuation to avoid stripping legitimate titles like "Module Federation".
+            var stripped = Regex.Replace(
+                trimmed,
+                @"^\s*(module|submodule|sub-module|sub module)\s*(\d+(?:\.\d+)*)?\s*[:\.\-–—\)\]]\s*",
+                string.Empty,
+                RegexOptions.IgnoreCase);
+
+            stripped = Regex.Replace(
+                stripped,
+                @"^\s*(module|submodule|sub-module|sub module)\s*(\d+(?:\.\d+)*)\s+",
+                string.Empty,
+                RegexOptions.IgnoreCase);
+
+            return string.IsNullOrWhiteSpace(stripped) ? trimmed : stripped.Trim();
+        }
+
+        private static string FallbackModuleTitle(int index, string topic)
+        {
+            topic = string.IsNullOrWhiteSpace(topic) ? "Course" : topic.Trim();
+
+            return index switch
+            {
+                1 => $"Foundations of {topic}",
+                2 => $"{topic} setup and tooling",
+                3 => $"Core concepts in {topic}",
+                4 => $"Hands-on practice with {topic}",
+                _ => $"{topic} project"
+            };
+        }
+
+        private static string FallbackSubModuleTitle(int index)
+        {
+            return index switch
+            {
+                1 => "Overview",
+                2 => "Hands-on",
+                3 => "Review",
+                4 => "Mini project",
+                _ => "Practice"
+            };
         }
 
         private static AiCourseGenerateResponse BuildHeuristicCourse(string prompt)
