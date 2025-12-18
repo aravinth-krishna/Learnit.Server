@@ -60,7 +60,7 @@ namespace Learnit.Server.Controllers
         [HttpPost("create-course")]
         public async Task<ActionResult<AiCourseGenerateResponse>> CreateCourse([FromBody] AiCourseGenerateRequest request, CancellationToken cancellationToken)
         {
-            var systemPrompt = "You are Learnit AI. RESPOND WITH ONLY MINIFIED JSON (no prose, no code fences) matching: {title, description (optional, can be empty), subjectArea, learningObjectives:[3-6 short strings], difficulty, priority, totalEstimatedHours:int, targetCompletionDate:'yyyy-MM-dd', notes, modules:[{title, description (optional), estimatedHours:int, subModules:[{title, description (optional), estimatedHours:int}]}]}. Hard rules: (1) Always include at least 4 modules (or more if the user asks for more). Each module must have at least 2 subModules (or more if the user asks for more). If the user specifies a minimum like 'at least 5 submodules per module', you MUST follow it. (2) All estimatedHours are positive integers; if missing, set 2 for modules and 1 for subModules. (3) Module/subModule titles must be plain titles only — do NOT prefix titles with labels like 'Module 2:' or 'Submodule 2.1:'. (4) Make titles specific to the prompt; descriptions are optional. (5) learningObjectives must be outcome-focused bullets (no numbering). (6) targetCompletionDate must be within 30-90 days from today in 'yyyy-MM-dd'. (7) difficulty ∈ {Beginner, Intermediate, Advanced}, priority ∈ {High, Medium, Low}. (8) No markdown, no extra text—pure JSON only. (9) Ensure the JSON is syntactically valid; never put objects in quotes (no \"{...}\").";
+            var systemPrompt = "You are Learnit AI. RESPOND WITH ONLY MINIFIED JSON (no prose, no code fences) matching: {title, description, subjectArea, learningObjectives:[3-6 short strings], difficulty, priority, totalEstimatedHours:int, targetCompletionDate:'yyyy-MM-dd', notes, modules:[{title, estimatedHours:int, subModules:[{title, estimatedHours:int}]}]}. Hard rules: (1) Always include at least 4 modules (or more if the user asks for more). Each module must have at least 2 subModules (or more if the user asks for more). If the user specifies a minimum like 'at least 5 submodules per module', you MUST follow it. (2) description is course-level only: include 1-2 concise sentences describing what the course covers. (3) Do NOT include module/subModule description fields at all. (4) All estimatedHours are positive integers; if missing, set 2 for modules and 1 for subModules. (5) Module/subModule titles must be plain titles only — do NOT prefix titles with labels like 'Module 2:' or 'Submodule 2.1:'. (6) learningObjectives must be outcome-focused bullets (no numbering). (7) targetCompletionDate must be within 30-90 days from today in 'yyyy-MM-dd'. (8) difficulty ∈ {Beginner, Intermediate, Advanced}, priority ∈ {High, Medium, Low}. (9) No markdown, no extra text—pure JSON only. (10) Ensure the JSON is syntactically valid; never put objects in quotes (no \"{...}\").";
             var reply = await _provider.GenerateAsync(systemPrompt, request.Prompt, null, cancellationToken);
 
             // Temporary diagnostics for client debugging
@@ -137,7 +137,7 @@ namespace Learnit.Server.Controllers
                             var moduleDraft = new AiModuleDraft
                             {
                                 Title = GetString(m, "title", "Module"),
-                                Description = GetString(m, "description"),
+                                Description = null,
                                 EstimatedHours = ParseHours(m, 1, "estimatedHours", "estimated_hours", "hours"),
                                 SubModules = new List<AiSubModuleDraft>()
                             };
@@ -151,7 +151,7 @@ namespace Learnit.Server.Controllers
                                     {
                                         Title = GetString(s, "title", "Submodule"),
                                         EstimatedHours = ParseHours(s, 1, "estimatedHours", "estimated_hours", "hours"),
-                                        Description = GetString(s, "description"),
+                                        Description = null,
                                     });
                                 }
                             }
@@ -223,7 +223,7 @@ namespace Learnit.Server.Controllers
                                 var moduleDraft = new AiModuleDraft
                                 {
                                     Title = GetString(m, "title", "Module"),
-                                    Description = string.Empty,
+                                    Description = null,
                                     EstimatedHours = ParseHours(m, 2, "estimatedHours", "hours"),
                                     SubModules = new List<AiSubModuleDraft>()
                                 };
@@ -237,7 +237,7 @@ namespace Learnit.Server.Controllers
                                         {
                                             Title = GetString(s, "title", "Submodule"),
                                             EstimatedHours = ParseHours(s, 1, "estimatedHours", "hours"),
-                                            Description = string.Empty,
+                                            Description = null,
                                         });
                                     }
                                 }
@@ -288,7 +288,7 @@ namespace Learnit.Server.Controllers
                         var moduleDraft = new AiModuleDraft
                         {
                             Title = GetString(m, "title", "Module"),
-                            Description = string.Empty,
+                            Description = null,
                             EstimatedHours = ParseHours(m, 2, "estimatedHours", "hours"),
                             SubModules = new List<AiSubModuleDraft>()
                         };
@@ -302,7 +302,7 @@ namespace Learnit.Server.Controllers
                                 {
                                     Title = GetString(s, "title", "Submodule"),
                                     EstimatedHours = ParseHours(s, 1, "estimatedHours", "hours"),
-                                    Description = string.Empty,
+                                    Description = null,
                                 });
                             }
                         }
@@ -518,6 +518,10 @@ namespace Learnit.Server.Controllers
 
             resp.Title = string.IsNullOrWhiteSpace(resp.Title) ? "Course Plan" : resp.Title.Trim();
             resp.Description = resp.Description?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(resp.Description) && !string.IsNullOrWhiteSpace(prompt))
+            {
+                resp.Description = prompt.Trim();
+            }
             resp.SubjectArea = resp.SubjectArea?.Trim() ?? string.Empty;
             resp.Difficulty = string.IsNullOrWhiteSpace(resp.Difficulty) ? "Balanced" : resp.Difficulty.Trim();
             resp.Priority = string.IsNullOrWhiteSpace(resp.Priority) ? "Medium" : resp.Priority.Trim();
@@ -581,7 +585,7 @@ namespace Learnit.Server.Controllers
                 module.Title = string.IsNullOrWhiteSpace(module.Title) ? "Untitled" : module.Title.Trim();
                 module.Title = StripSectionLabel(module.Title);
                 if (string.IsNullOrWhiteSpace(module.Title)) module.Title = "Untitled";
-                module.Description = module.Description?.Trim() ?? string.Empty;
+                module.Description = null;
                 module.EstimatedHours = module.EstimatedHours <= 0 ? 1 : module.EstimatedHours;
 
                 if (module.SubModules == null)
@@ -616,7 +620,7 @@ namespace Learnit.Server.Controllers
                     sub.Title = string.IsNullOrWhiteSpace(sub.Title) ? "Untitled" : sub.Title.Trim();
                     sub.Title = StripSectionLabel(sub.Title);
                     if (string.IsNullOrWhiteSpace(sub.Title)) sub.Title = "Untitled";
-                    sub.Description = sub.Description?.Trim() ?? string.Empty;
+                    sub.Description = null;
                     sub.EstimatedHours = sub.EstimatedHours <= 0 ? 1 : sub.EstimatedHours;
                 }
             }

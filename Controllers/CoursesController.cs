@@ -84,11 +84,9 @@ namespace Learnit.Server.Controllers
             var moduleHours = course.Modules.Sum(m => m.EstimatedHours);
             var subModuleHours = course.Modules.SelectMany(m => m.SubModules).Sum(sm => sm.EstimatedHours);
 
-            var totalEstimated = moduleHours + subModuleHours;
-            if (totalEstimated == 0 && course.TotalEstimatedHours > 0)
-            {
-                totalEstimated = course.TotalEstimatedHours;
-            }
+            var totalEstimated = course.TotalEstimatedHours > 0
+                ? course.TotalEstimatedHours
+                : (moduleHours + subModuleHours);
 
             var completedModuleHours = course.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
             var completedSubModuleHours = course.Modules
@@ -107,9 +105,10 @@ namespace Learnit.Server.Controllers
             var scheduledHours = scheduledLookup.TryGetValue(course.Id, out var sh) ? sh : 0;
             var completedHours = completedLookup.TryGetValue(course.Id, out var ch) ? ch : 0;
 
-            var effectiveCompleted = Math.Max(completedEstimated, completedHours);
+            // Hours remaining should reflect completion status (modules/submodules), not study sessions.
+            // Completed study time is still returned separately as CompletedHours.
             var hoursRemaining = totalEstimated > 0
-                ? Math.Max(0, totalEstimated - effectiveCompleted)
+                ? Math.Max(0, totalEstimated - completedEstimated)
                 : 0;
 
             return new CourseProgressSnapshot(
@@ -125,7 +124,9 @@ namespace Learnit.Server.Controllers
         {
             var moduleHours = course.Modules.Sum(m => m.EstimatedHours);
             var subModuleHours = course.Modules.SelectMany(m => m.SubModules).Sum(sm => sm.EstimatedHours);
-            var totalEstimated = moduleHours + subModuleHours;
+            var totalEstimated = course.TotalEstimatedHours > 0
+                ? course.TotalEstimatedHours
+                : (moduleHours + subModuleHours);
 
             var completedModuleHours = course.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
             var completedSubModuleHours = course.Modules
@@ -649,9 +650,12 @@ namespace Learnit.Server.Controllers
 
                 sub.IsCompleted = !sub.IsCompleted;
                 var course = sub.CourseModule!.Course!;
-                await _db.Entry(course).Collection(c => c.Modules).LoadAsync();
-                var completedEstimated = course.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
-                course.HoursRemaining = Math.Max(0, course.TotalEstimatedHours - completedEstimated);
+                await _db.Entry(course)
+                    .Collection(c => c.Modules)
+                    .Query()
+                    .Include(m => m.SubModules)
+                    .LoadAsync();
+                course.HoursRemaining = CalculateHoursRemainingFromModules(course);
                 course.UpdatedAt = DateTime.UtcNow;
                 await _db.SaveChangesAsync();
                 return Ok(new { sub.IsCompleted, course.HoursRemaining });
@@ -660,9 +664,12 @@ namespace Learnit.Server.Controllers
             module.IsCompleted = !module.IsCompleted;
 
             var parentCourse = module.Course!;
-            await _db.Entry(parentCourse).Collection(c => c.Modules).LoadAsync();
-            var completedEstimatedHours = parentCourse.Modules.Where(m => m.IsCompleted).Sum(m => m.EstimatedHours);
-            parentCourse.HoursRemaining = Math.Max(0, parentCourse.TotalEstimatedHours - completedEstimatedHours);
+            await _db.Entry(parentCourse)
+                .Collection(c => c.Modules)
+                .Query()
+                .Include(m => m.SubModules)
+                .LoadAsync();
+            parentCourse.HoursRemaining = CalculateHoursRemainingFromModules(parentCourse);
             parentCourse.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();

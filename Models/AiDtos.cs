@@ -41,7 +41,7 @@ namespace Learnit.Server.Models
     public class AiModuleDraft
     {
         public string Title { get; set; } = "";
-        public string Description { get; set; } = "";
+        public string? Description { get; set; }
         public int EstimatedHours { get; set; } = 2;
         public List<AiSubModuleDraft> SubModules { get; set; } = new();
     }
@@ -50,7 +50,7 @@ namespace Learnit.Server.Models
     {
         public string Title { get; set; } = "";
         public int EstimatedHours { get; set; } = 1;
-        public string Description { get; set; } = "";
+        public string? Description { get; set; }
     }
 
     public class AiInsightRequest
