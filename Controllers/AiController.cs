@@ -60,7 +60,7 @@ namespace Learnit.Server.Controllers
         [HttpPost("create-course")]
         public async Task<ActionResult<AiCourseGenerateResponse>> CreateCourse([FromBody] AiCourseGenerateRequest request, CancellationToken cancellationToken)
         {
-            var systemPrompt = "You are Learnit AI. RESPOND WITH ONLY MINIFIED JSON (no prose, no code fences) matching: {title, description (optional, can be empty), subjectArea, learningObjectives:[3-6 short strings], difficulty, priority, totalEstimatedHours:int, targetCompletionDate:'yyyy-MM-dd', notes, modules:[{title, description (optional), estimatedHours:int, subModules:[{title, description (optional), estimatedHours:int}]}]}. Hard rules: (1) Always include at least 4 modules; each module has >=2 subModules. (2) All estimatedHours are positive integers; if missing, set 2 for modules and 1 for subModules. (3) Module/subModule titles must be plain titles only — do NOT prefix titles with labels like 'Module 2:' or 'Submodule 2.1:'. (4) Make titles specific to the prompt; descriptions are optional. (5) learningObjectives must be outcome-focused bullets (no numbering). (6) targetCompletionDate must be within 30-90 days from today in 'yyyy-MM-dd'. (7) difficulty ∈ {Beginner, Intermediate, Advanced}, priority ∈ {High, Medium, Low}. (8) No markdown, no extra text—pure JSON only. (9) Ensure the JSON is syntactically valid; never put objects in quotes (no \"{...}\").";
+            var systemPrompt = "You are Learnit AI. RESPOND WITH ONLY MINIFIED JSON (no prose, no code fences) matching: {title, description (optional, can be empty), subjectArea, learningObjectives:[3-6 short strings], difficulty, priority, totalEstimatedHours:int, targetCompletionDate:'yyyy-MM-dd', notes, modules:[{title, description (optional), estimatedHours:int, subModules:[{title, description (optional), estimatedHours:int}]}]}. Hard rules: (1) Always include at least 4 modules (or more if the user asks for more). Each module must have at least 2 subModules (or more if the user asks for more). If the user specifies a minimum like 'at least 5 submodules per module', you MUST follow it. (2) All estimatedHours are positive integers; if missing, set 2 for modules and 1 for subModules. (3) Module/subModule titles must be plain titles only — do NOT prefix titles with labels like 'Module 2:' or 'Submodule 2.1:'. (4) Make titles specific to the prompt; descriptions are optional. (5) learningObjectives must be outcome-focused bullets (no numbering). (6) targetCompletionDate must be within 30-90 days from today in 'yyyy-MM-dd'. (7) difficulty ∈ {Beginner, Intermediate, Advanced}, priority ∈ {High, Medium, Low}. (8) No markdown, no extra text—pure JSON only. (9) Ensure the JSON is syntactically valid; never put objects in quotes (no \"{...}\").";
             var reply = await _provider.GenerateAsync(systemPrompt, request.Prompt, null, cancellationToken);
 
             // Temporary diagnostics for client debugging
@@ -68,7 +68,7 @@ namespace Learnit.Server.Controllers
             Console.WriteLine(reply);
 
             var parsed = TryParseCourseJson(reply, request.Prompt) ?? BuildHeuristicCourse(request.Prompt);
-            var normalized = NormalizeCourse(parsed);
+            var normalized = NormalizeCourse(parsed, request.Prompt);
 
             Console.WriteLine("[AI parsed course]");
             Console.WriteLine(JsonSerializer.Serialize(normalized));
@@ -507,8 +507,15 @@ namespace Learnit.Server.Controllers
             return fallback;
         }
 
-        private static AiCourseGenerateResponse NormalizeCourse(AiCourseGenerateResponse resp)
+        private static AiCourseGenerateResponse NormalizeCourse(AiCourseGenerateResponse resp, string? prompt)
         {
+            var (minModulesFromPrompt, minSubModulesFromPrompt) = ExtractRequestedMinimums(prompt);
+
+            // Also respect week-based prompts like "8 week" by ensuring at least that many top-level modules.
+            var weeks = ExtractWeeks(prompt ?? string.Empty);
+            var minModules = Math.Max(4, Math.Max(minModulesFromPrompt, weeks));
+            var minSubModules = Math.Max(2, minSubModulesFromPrompt);
+
             resp.Title = string.IsNullOrWhiteSpace(resp.Title) ? "Course Plan" : resp.Title.Trim();
             resp.Description = resp.Description?.Trim() ?? string.Empty;
             resp.SubjectArea = resp.SubjectArea?.Trim() ?? string.Empty;
@@ -548,11 +555,11 @@ namespace Learnit.Server.Controllers
                 });
             }
 
-            // Ensure a minimum of 4 modules for UI + downstream expectations.
-            if (resp.Modules.Count < 4)
+            // Ensure a minimum number of modules for UI + prompt expectations.
+            if (resp.Modules.Count < minModules)
             {
                 var topic = string.IsNullOrWhiteSpace(resp.SubjectArea) ? "Course" : resp.SubjectArea;
-                while (resp.Modules.Count < 4)
+                while (resp.Modules.Count < minModules)
                 {
                     var idx = resp.Modules.Count + 1;
                     resp.Modules.Add(new AiModuleDraft
@@ -592,12 +599,13 @@ namespace Learnit.Server.Controllers
                     });
                 }
 
-                // Ensure each module has >= 2 sub-modules.
-                while (module.SubModules.Count < 2)
+                // Ensure each module has >= requested minimum sub-modules.
+                while (module.SubModules.Count < minSubModules)
                 {
+                    var nextIndex = module.SubModules.Count + 1;
                     module.SubModules.Add(new AiSubModuleDraft
                     {
-                        Title = FallbackSubModuleTitle(module.SubModules.Count + 1),
+                        Title = FallbackSubModuleTitle(nextIndex),
                         EstimatedHours = 1,
                         Description = string.Empty
                     });
@@ -629,6 +637,57 @@ namespace Learnit.Server.Controllers
             }
 
             return resp;
+        }
+
+        private static (int minModules, int minSubModules) ExtractRequestedMinimums(string? prompt)
+        {
+            if (string.IsNullOrWhiteSpace(prompt)) return (0, 0);
+
+            var text = prompt;
+
+            // Common patterns we want to respect:
+            // - "at least 5 sub level modules for each top level module"
+            // - "minimum 6 submodules per module"
+            // - "need 8 modules" / "at least 10 top level modules"
+            // Keep conservative caps to avoid runaway generation.
+            int minModules = 0;
+            int minSubModules = 0;
+
+            // Submodule minimums
+            var subMatches = new[]
+            {
+                // at least 5 submodules per module
+                @"\b(at\s*least|min(?:imum)?)\s*(?<n>\d{1,2})\s*(sub\s*-?\s*level\s*)?(sub\s*-?\s*modules?|lessons?|topics?)\b(\s*(per|for\s*each)\s*(top\s*-?\s*level\s*)?(module|modules))?",
+                // 5 submodules each module
+                @"\b(?<n>\d{1,2})\s*(sub\s*-?\s*level\s*)?(sub\s*-?\s*modules?|lessons?|topics?)\b\s*(per|for\s*each)\s*(top\s*-?\s*level\s*)?(module|modules)"
+            };
+
+            foreach (var pattern in subMatches)
+            {
+                var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
+                if (match.Success && int.TryParse(match.Groups["n"].Value, out var n) && n > 0)
+                {
+                    minSubModules = Math.Max(minSubModules, Math.Min(n, 20));
+                }
+            }
+
+            // Module minimums
+            var moduleMatches = new[]
+            {
+                @"\b(at\s*least|min(?:imum)?)\s*(?<n>\d{1,2})\s*(top\s*-?\s*level\s*)?(modules?)\b",
+                @"\bneed\s*(?<n>\d{1,2})\s*(top\s*-?\s*level\s*)?(modules?)\b"
+            };
+
+            foreach (var pattern in moduleMatches)
+            {
+                var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
+                if (match.Success && int.TryParse(match.Groups["n"].Value, out var n) && n > 0)
+                {
+                    minModules = Math.Max(minModules, Math.Min(n, 20));
+                }
+            }
+
+            return (minModules, minSubModules);
         }
 
         private static string StripSectionLabel(string title)
