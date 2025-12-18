@@ -75,6 +75,260 @@ namespace Learnit.Server.Controllers
             return Ok(normalized);
         }
 
+        [HttpPost("module-quiz")]
+        public async Task<ActionResult<AiModuleQuizResponse>> ModuleQuiz([FromBody] AiModuleQuizRequest request, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(request.ModuleTitle))
+            {
+                return BadRequest(new { message = "ModuleTitle is required" });
+            }
+
+            var questionCount = request.QuestionCount <= 0 ? 5 : Math.Clamp(request.QuestionCount, 3, 8);
+            var durationSeconds = request.DurationSeconds <= 0 ? 60 : Math.Clamp(request.DurationSeconds, 30, 300);
+            const int passingScore = 60;
+
+            var difficulty = string.IsNullOrWhiteSpace(request.Difficulty) ? "Beginner" : request.Difficulty.Trim();
+            var courseTitle = request.CourseTitle?.Trim() ?? string.Empty;
+            var moduleTitle = request.ModuleTitle.Trim();
+
+            var systemPrompt =
+                "You are Learnit AI. RESPOND WITH ONLY MINIFIED JSON (no prose, no code fences) matching: " +
+                "{durationSeconds:int, passingScore:int, questions:[{question:string, options:[4 strings], correctIndex:int}]}. " +
+                $"Hard rules: durationSeconds MUST be {durationSeconds}. passingScore MUST be {passingScore}. " +
+                $"questions MUST have exactly {questionCount} items. Each options array MUST have exactly 4 distinct strings. " +
+                "correctIndex MUST be an integer 0-3. No markdown and no extra keys.";
+
+            var prompt = $"Course title: {courseTitle}\nModule title: {moduleTitle}\nDifficulty: {difficulty}\nGenerate {questionCount} MCQs to test knowledge of this module.";
+
+            var reply = await _provider.GenerateAsync(systemPrompt, prompt, null, cancellationToken);
+            var parsed = TryParseModuleQuizJson(reply, durationSeconds, passingScore, questionCount);
+            var normalized = NormalizeQuiz(
+                parsed ?? BuildFallbackQuiz(moduleTitle, durationSeconds, passingScore, questionCount),
+                moduleTitle,
+                durationSeconds,
+                passingScore,
+                questionCount);
+
+            return Ok(normalized);
+        }
+
+        private static AiModuleQuizResponse? TryParseModuleQuizJson(
+            string reply,
+            int durationSeconds,
+            int passingScore,
+            int questionCount)
+        {
+            foreach (var candidate in BuildJsonCandidates(ExtractJsonBlock(reply)))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(candidate, new JsonDocumentOptions
+                    {
+                        AllowTrailingCommas = true,
+                        CommentHandling = JsonCommentHandling.Skip,
+                    });
+
+                    var root = doc.RootElement;
+                    if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 0)
+                    {
+                        root = root[0];
+                    }
+
+                    var resp = new AiModuleQuizResponse
+                    {
+                        DurationSeconds = ParseHours(root, durationSeconds, "durationSeconds", "duration_seconds", "duration"),
+                        PassingScore = ParseHours(root, passingScore, "passingScore", "passing_score", "passingscore"),
+                        Questions = new List<AiModuleQuizQuestion>(),
+                    };
+
+                    var qs = GetProperty(root, "questions") ?? GetProperty(root, "mcqs") ?? GetProperty(root, "items");
+                    if (qs?.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var q in qs.Value.EnumerateArray())
+                        {
+                            var optionsProp = GetProperty(q, "options") ?? GetProperty(q, "choices") ?? GetProperty(q, "answers");
+                            var options = new List<string>();
+                            if (optionsProp?.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var opt in optionsProp.Value.EnumerateArray())
+                                {
+                                    if (opt.ValueKind == JsonValueKind.String)
+                                    {
+                                        var s = opt.GetString();
+                                        if (!string.IsNullOrWhiteSpace(s)) options.Add(s.Trim());
+                                    }
+                                    else
+                                    {
+                                        var s = opt.ToString();
+                                        if (!string.IsNullOrWhiteSpace(s)) options.Add(s.Trim());
+                                    }
+                                }
+                            }
+
+                            resp.Questions.Add(new AiModuleQuizQuestion
+                            {
+                                Question = GetString(q, "", "question", "prompt", "text"),
+                                Options = options,
+                                CorrectIndex = ParseHours(q, 0, "correctIndex", "correct_index", "answerIndex", "answer_index"),
+                            });
+                        }
+                    }
+
+                    if (!resp.Questions.Any()) return null;
+                    return resp;
+                }
+                catch
+                {
+                    // try next candidate
+                }
+            }
+
+            return null;
+        }
+
+        private static AiModuleQuizResponse NormalizeQuiz(
+            AiModuleQuizResponse quiz,
+            string moduleTitle,
+            int durationSeconds,
+            int passingScore,
+            int questionCount)
+        {
+            quiz.DurationSeconds = durationSeconds;
+            quiz.PassingScore = passingScore;
+
+            if (quiz.Questions == null)
+            {
+                quiz.Questions = new List<AiModuleQuizQuestion>();
+            }
+
+            // Normalize each question to 4 options and valid correct index.
+            var normalizedQuestions = new List<AiModuleQuizQuestion>();
+            foreach (var q in quiz.Questions)
+            {
+                if (q == null) continue;
+                var text = (q.Question ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(text)) continue;
+
+                var options = (q.Options ?? new List<string>())
+                    .Where(o => !string.IsNullOrWhiteSpace(o))
+                    .Select(o => o.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(4)
+                    .ToList();
+
+                while (options.Count < 4)
+                {
+                    options.Add($"Option {options.Count + 1}");
+                }
+
+                var correctIndex = q.CorrectIndex;
+                if (correctIndex < 0 || correctIndex > 3) correctIndex = 0;
+
+                normalizedQuestions.Add(new AiModuleQuizQuestion
+                {
+                    Question = text,
+                    Options = options,
+                    CorrectIndex = correctIndex,
+                });
+
+                if (normalizedQuestions.Count >= questionCount) break;
+            }
+
+            // Ensure we always return exactly questionCount questions.
+            if (normalizedQuestions.Count < questionCount)
+            {
+                var fallback = BuildFallbackQuiz(moduleTitle, durationSeconds, passingScore, questionCount);
+                foreach (var fq in fallback.Questions)
+                {
+                    if (normalizedQuestions.Count >= questionCount) break;
+                    normalizedQuestions.Add(fq);
+                }
+            }
+
+            quiz.Questions = normalizedQuestions.Take(questionCount).ToList();
+            return quiz;
+        }
+
+        private static AiModuleQuizResponse BuildFallbackQuiz(
+            string moduleTitle,
+            int durationSeconds,
+            int passingScore,
+            int questionCount)
+        {
+            var title = string.IsNullOrWhiteSpace(moduleTitle) ? "this topic" : moduleTitle.Trim();
+
+            var seed = Math.Abs(title.GetHashCode());
+            var rng = new Random(seed);
+
+            var templates = new List<AiModuleQuizQuestion>
+            {
+                new()
+                {
+                    Question = $"What is the main goal of {title}?",
+                    Options = new List<string>
+                    {
+                        "Understand the core concepts and how to apply them",
+                        "Memorize random facts without context",
+                        "Skip fundamentals and jump to advanced topics",
+                        "Avoid practice and only read summaries"
+                    },
+                    CorrectIndex = 0
+                },
+                new()
+                {
+                    Question = $"Which approach is best when learning {title}?",
+                    Options = new List<string>
+                    {
+                        "Combine small theory blocks with hands-on practice",
+                        "Only watch videos without trying exercises",
+                        "Ignore feedback and never review mistakes",
+                        "Change topics every few minutes"
+                    },
+                    CorrectIndex = 0
+                },
+                new()
+                {
+                    Question = $"Which outcome indicates you understand {title}?",
+                    Options = new List<string>
+                    {
+                        "You can explain it and solve a simple problem",
+                        "You can repeat definitions verbatim",
+                        "You can guess answers without reasoning",
+                        "You can recall unrelated trivia"
+                    },
+                    CorrectIndex = 0
+                },
+                new()
+                {
+                    Question = $"What is a good next step after finishing {title}?",
+                    Options = new List<string>
+                    {
+                        "Do a short recap and apply it to a small project",
+                        "Immediately forget it and move on",
+                        "Avoid any exercises",
+                        "Only collect bookmarks"
+                    },
+                    CorrectIndex = 0
+                }
+            };
+
+            // Shuffle deterministically-ish
+            templates = templates.OrderBy(_ => rng.Next()).ToList();
+
+            var questions = new List<AiModuleQuizQuestion>();
+            while (questions.Count < questionCount)
+            {
+                questions.Add(templates[questions.Count % templates.Count]);
+            }
+
+            return new AiModuleQuizResponse
+            {
+                DurationSeconds = durationSeconds,
+                PassingScore = passingScore,
+                Questions = questions
+            };
+        }
+
         private static string ExtractJsonBlock(string reply)
         {
             // Attempt to pull a JSON object even if the model added prose around it

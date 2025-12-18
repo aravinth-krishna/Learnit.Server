@@ -93,4 +93,27 @@ namespace Learnit.Server.Models
     {
         public List<string> FriendIds { get; set; } = new();
     }
+
+    public class AiModuleQuizRequest
+    {
+        public string CourseTitle { get; set; } = "";
+        public string ModuleTitle { get; set; } = "";
+        public string? Difficulty { get; set; } = null;
+        public int QuestionCount { get; set; } = 5;
+        public int DurationSeconds { get; set; } = 60;
+    }
+
+    public class AiModuleQuizQuestion
+    {
+        public string Question { get; set; } = "";
+        public List<string> Options { get; set; } = new();
+        public int CorrectIndex { get; set; } = 0;
+    }
+
+    public class AiModuleQuizResponse
+    {
+        public int DurationSeconds { get; set; } = 60;
+        public int PassingScore { get; set; } = 70;
+        public List<AiModuleQuizQuestion> Questions { get; set; } = new();
+    }
 }
